@@ -12,6 +12,7 @@ Map a change category to the minimum reliable proof. Use exact repository comman
 | Data or migration | <!-- TODO(harness): fixture/dry run --> | <!-- reconciliation/rollback check --> | Before/after counts or invariant | <!-- fallback --> | <!-- role/trigger --> |
 | CI or build system | <!-- TODO(harness): config validation --> | <!-- representative job --> | Expected job graph/artifact | <!-- fallback --> | <!-- role/trigger --> |
 | Security-sensitive boundary | <!-- TODO(harness): focused test/scan --> | <!-- threat-specific validation --> | Reproduction fails after fix | <!-- fallback --> | <!-- role/trigger --> |
+| Harness authority, evidence, CI, release, or production boundary | <!-- TODO(harness): native focused gate --> | <!-- full native certification --> | Trusted commit, fresh evidence, production approval, rollback, and invalidation/recovery trace | Fail closed and remove production-ready claim | <!-- durable role plus every relevant change --> |
 
 ## Rules
 
@@ -19,3 +20,4 @@ Map a change category to the minimum reliable proof. Use exact repository comman
 - Prefer a narrow deterministic check before an expensive broad suite.
 - Record environment assumptions and cleanup for stateful checks.
 - Treat flaky, unavailable, or untrusted checks as a harness gap rather than a pass.
+- Re-certify after every relevant change and on the bounded schedule; an expired or mismatched certificate is a failure, not historical proof.

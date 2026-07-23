@@ -12,6 +12,7 @@ import tempfile
 import unicodedata
 import unittest
 import zipfile
+from datetime import datetime, timezone
 from unittest import mock
 from pathlib import Path, PurePosixPath
 
@@ -185,6 +186,135 @@ def tree_fingerprint(root: Path) -> dict[str, str]:
     return result
 
 
+CERT_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+CERT_NOW = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc)
+
+
+def evidence_record(
+    capability: str,
+    *,
+    environment: str = "ci",
+    command: str = "make verify-harness",
+    result: str = "passed",
+    observed_at: str = "2026-07-23T11:00:00Z",
+    commit: str = CERT_COMMIT,
+) -> str:
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "repository_commit": commit,
+            "capabilities": [capability],
+            "environment": environment,
+            "command": command,
+            "exit_code": 0 if result == "passed" else None,
+            "observed_at": observed_at,
+            "result": result,
+            "artifacts": ["ci-job:immutable-12345"],
+        },
+        indent=2,
+    )
+
+
+def install_valid_certification(root: Path) -> dict[str, object]:
+    template = (
+        harness.TEMPLATE_ROOT / "docs/agent-harness/coverage-matrix.md"
+    ).read_text(encoding="utf-8")
+    rows, _, _, _ = harness.coverage_table_rows(template)
+    coverage_lines = [
+        "# Harness Engineering Coverage Matrix",
+        "",
+        "| Source principle or capability | Repository implementation | Required evidence | Status and reason |",
+        "| --- | --- | --- | --- |",
+    ]
+    production_identity = harness.normalize_coverage_identity(
+        "Release, deployment, and production actions require repository-local authority"
+    )
+    for index, row in enumerate(rows):
+        filename = f"capability-{index:02d}.json"
+        environment = (
+            "production"
+            if harness.normalize_coverage_identity(row.identity) == production_identity
+            else "ci"
+        )
+        put(
+            root,
+            f"docs/agent-harness/evidence/{filename}",
+            evidence_record(row.identity, environment=environment),
+        )
+        coverage_lines.append(
+            f"| {row.identity} | Project-native implementation | Observed behavior | "
+            f"verified — [fresh evidence](evidence/{filename}) |"
+        )
+    coverage_text = "\n".join(coverage_lines) + "\n"
+    put(root, "docs/agent-harness/coverage-matrix.md", coverage_text)
+
+    named_records = {
+        "project-native-gate.json": (
+            harness.PROJECT_GATE_CAPABILITY,
+            "ci",
+            "make verify-harness",
+        ),
+        "continuous-maintenance.json": (
+            harness.MAINTENANCE_CAPABILITY,
+            "ci",
+            "make maintain-harness",
+        ),
+        "production-approval.json": (
+            harness.PRODUCTION_APPROVAL_CAPABILITY,
+            "production",
+            "release-approval verify immutable-approval-123",
+        ),
+        "production-rollback.json": (
+            harness.PRODUCTION_ROLLBACK_CAPABILITY,
+            "production",
+            "release-rollback verify immutable-drill-123",
+        ),
+    }
+    for filename, (capability, environment, command) in named_records.items():
+        put(
+            root,
+            f"docs/agent-harness/evidence/{filename}",
+            evidence_record(
+                capability,
+                environment=environment,
+                command=command,
+            ),
+        )
+
+    manifest: dict[str, object] = {
+        "schema_version": 1,
+        "claim": "production-ready",
+        "profile": "adaptive",
+        "repository_commit": CERT_COMMIT,
+        "environment": "production",
+        "issued_at": "2026-07-23T11:30:00Z",
+        "expires_at": "2026-07-24T11:30:00Z",
+        "coverage_sha256": hashlib.sha256(coverage_text.encode()).hexdigest(),
+        "evidence_root": "docs/agent-harness/evidence",
+        "project_native_gate": {
+            "command": "make verify-harness",
+            "evidence": "docs/agent-harness/evidence/project-native-gate.json",
+        },
+        "maintenance": {
+            "command": "make maintain-harness",
+            "triggers": ["pull_request", "push", "schedule"],
+            "max_age_hours": 48,
+            "evidence": "docs/agent-harness/evidence/continuous-maintenance.json",
+        },
+        "production_authority": {
+            "owner": "release-engineering",
+            "approval_evidence": "docs/agent-harness/evidence/production-approval.json",
+            "rollback_evidence": "docs/agent-harness/evidence/production-rollback.json",
+        },
+    }
+    put(
+        root,
+        harness.CERTIFICATION_REL,
+        json.dumps(manifest, indent=2),
+    )
+    return manifest
+
+
 class HarnessTests(unittest.TestCase):
     def make_root(self) -> tuple[tempfile.TemporaryDirectory[str], Path]:
         temporary = tempfile.TemporaryDirectory()
@@ -264,6 +394,16 @@ class HarnessTests(unittest.TestCase):
         commands = (
             ("audit", "--root", str(root), "--allow-non-git"),
             ("check", "--root", str(root), "--allow-non-git"),
+            (
+                "certify",
+                "--root",
+                str(root),
+                "--allow-non-git",
+                "--profile",
+                "adaptive",
+                "--commit",
+                CERT_COMMIT,
+            ),
             (
                 "scaffold",
                 "--root",
@@ -2316,6 +2456,27 @@ _None._
         harness.validate_coverage(report, root, path, require_canonical_rows=True)
         self.assertIn("COVERAGE003", {item.id for item in report.findings})
 
+    def test_canonical_coverage_inventory_remains_19_plus_12_rows(self) -> None:
+        text = (
+            harness.TEMPLATE_ROOT / "docs/agent-harness/coverage-matrix.md"
+        ).read_text(encoding="utf-8")
+        general, case_study = text.split("## Case-study decision ledger", 1)
+        general_rows, general_tables, _, _ = harness.coverage_table_rows(general)
+        case_rows, case_tables, _, _ = harness.coverage_table_rows(case_study)
+        self.assertEqual(1, general_tables)
+        self.assertEqual(1, case_tables)
+        self.assertEqual(19, len(general_rows))
+        self.assertEqual(12, len(case_rows))
+        self.assertEqual(
+            31,
+            len(
+                {
+                    harness.normalize_coverage_identity(row.identity)
+                    for row in general_rows + case_rows
+                }
+            ),
+        )
+
     def test_empty_override_falls_back_and_override_placeholders_are_scanned(self) -> None:
         temporary, root = self.make_root()
         self.addCleanup(temporary.cleanup)
@@ -2888,6 +3049,209 @@ _None._
         )
         self.assertEqual("verified", status)
         self.assertIn("p95", detail)
+
+    def test_valid_production_certification_is_commit_bound_and_read_only(self) -> None:
+        temporary, root = self.make_root()
+        self.addCleanup(temporary.cleanup)
+        install_valid_certification(root)
+        before = tree_fingerprint(root)
+        report = harness.Report(command="certify", root=str(root))
+        harness.validate_certification(
+            report,
+            root,
+            dict(harness.DEFAULT_AUTHORITIES),
+            "adaptive",
+            CERT_COMMIT,
+            now=CERT_NOW,
+        )
+        self.assertEqual([], [item for item in report.findings if item.severity == "error"])
+        self.assertEqual(before, tree_fingerprint(root))
+
+    def test_certification_rejects_commit_expiry_and_coverage_drift(self) -> None:
+        cases = ("commit", "expiry", "coverage")
+        for case in cases:
+            with self.subTest(case=case):
+                temporary, root = self.make_root()
+                self.addCleanup(temporary.cleanup)
+                manifest = install_valid_certification(root)
+                expected_commit = CERT_COMMIT
+                if case == "commit":
+                    expected_commit = "f" * 40
+                elif case == "expiry":
+                    manifest["expires_at"] = "2026-07-23T11:30:00Z"
+                    put(root, harness.CERTIFICATION_REL, json.dumps(manifest))
+                else:
+                    coverage = root / "docs/agent-harness/coverage-matrix.md"
+                    coverage.write_text(
+                        coverage.read_text(encoding="utf-8") + "\nDrift.\n",
+                        encoding="utf-8",
+                    )
+                report = harness.Report(command="certify", root=str(root))
+                harness.validate_certification(
+                    report,
+                    root,
+                    dict(harness.DEFAULT_AUTHORITIES),
+                    "adaptive",
+                    expected_commit,
+                    now=CERT_NOW,
+                )
+                ids = {item.id for item in report.findings if item.severity == "error"}
+                expected = {"commit": "CERT004", "expiry": "CERT005", "coverage": "CERT007"}
+                self.assertIn(expected[case], ids)
+
+    def test_certification_rejects_forged_stale_and_image_only_evidence(self) -> None:
+        cases = ("capability", "stale", "postissue", "duplicate", "image")
+        for case in cases:
+            with self.subTest(case=case):
+                temporary, root = self.make_root()
+                self.addCleanup(temporary.cleanup)
+                manifest = install_valid_certification(root)
+                evidence_path = root / "docs/agent-harness/evidence/capability-00.json"
+                if case in {"capability", "stale", "postissue", "duplicate"}:
+                    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+                    if case == "capability":
+                        evidence["capabilities"] = ["Different capability"]
+                    elif case == "stale":
+                        evidence["observed_at"] = "2026-07-01T00:00:00Z"
+                    elif case == "postissue":
+                        evidence["observed_at"] = "2026-07-23T11:45:00Z"
+                    if case == "duplicate":
+                        serialized = json.dumps(evidence).replace(
+                            '"result": "passed"',
+                            '"result": "failed", "result": "passed"',
+                        )
+                        evidence_path.write_text(serialized, encoding="utf-8")
+                    else:
+                        evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+                else:
+                    coverage_path = root / "docs/agent-harness/coverage-matrix.md"
+                    coverage = coverage_path.read_text(encoding="utf-8").replace(
+                        "[fresh evidence](evidence/capability-00.json)",
+                        "![fresh evidence](evidence/capability-00.json)",
+                        1,
+                    )
+                    coverage_path.write_text(coverage, encoding="utf-8")
+                    manifest["coverage_sha256"] = hashlib.sha256(coverage.encode()).hexdigest()
+                    put(root, harness.CERTIFICATION_REL, json.dumps(manifest))
+                report = harness.Report(command="certify", root=str(root))
+                harness.validate_certification(
+                    report,
+                    root,
+                    dict(harness.DEFAULT_AUTHORITIES),
+                    "adaptive",
+                    CERT_COMMIT,
+                    now=CERT_NOW,
+                )
+                self.assertIn("CERT009", {item.id for item in report.findings})
+
+    def test_certification_accepts_evidenced_na_but_not_production_na(self) -> None:
+        temporary, root = self.make_root()
+        self.addCleanup(temporary.cleanup)
+        manifest = install_valid_certification(root)
+        coverage_path = root / "docs/agent-harness/coverage-matrix.md"
+        coverage = coverage_path.read_text(encoding="utf-8")
+        coverage = coverage.replace(
+            "verified — [fresh evidence](evidence/capability-00.json)",
+            "N/A — [applicability evidence](evidence/capability-00.json)",
+            1,
+        )
+        evidence_path = root / "docs/agent-harness/evidence/capability-00.json"
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["result"] = "not-applicable"
+        evidence["exit_code"] = None
+        evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+        coverage_path.write_text(coverage, encoding="utf-8")
+        manifest["coverage_sha256"] = hashlib.sha256(coverage.encode()).hexdigest()
+        put(root, harness.CERTIFICATION_REL, json.dumps(manifest))
+        report = harness.Report(command="certify", root=str(root))
+        harness.validate_certification(
+            report,
+            root,
+            dict(harness.DEFAULT_AUTHORITIES),
+            "adaptive",
+            CERT_COMMIT,
+            now=CERT_NOW,
+        )
+        self.assertEqual([], [item for item in report.findings if item.severity == "error"])
+
+        production_line = next(
+            line
+            for line in coverage.splitlines()
+            if "Release, deployment, and production actions require repository-local authority" in line
+        )
+        production_na = production_line.replace(
+            "verified — [fresh evidence]", "N/A — [applicability evidence]"
+        )
+        coverage = coverage.replace(production_line, production_na)
+        coverage_path.write_text(coverage, encoding="utf-8")
+        manifest["coverage_sha256"] = hashlib.sha256(coverage.encode()).hexdigest()
+        put(root, harness.CERTIFICATION_REL, json.dumps(manifest))
+        report = harness.Report(command="certify", root=str(root))
+        harness.validate_certification(
+            report,
+            root,
+            dict(harness.DEFAULT_AUTHORITIES),
+            "adaptive",
+            CERT_COMMIT,
+            now=CERT_NOW,
+        )
+        self.assertIn("CERT009", {item.id for item in report.findings})
+
+    def test_certification_requires_continuous_native_and_production_gates(self) -> None:
+        cases = ("triggers", "native", "approval")
+        for case in cases:
+            with self.subTest(case=case):
+                temporary, root = self.make_root()
+                self.addCleanup(temporary.cleanup)
+                manifest = install_valid_certification(root)
+                if case == "triggers":
+                    maintenance = manifest["maintenance"]
+                    assert isinstance(maintenance, dict)
+                    maintenance["triggers"] = ["push"]
+                elif case == "native":
+                    gate = manifest["project_native_gate"]
+                    assert isinstance(gate, dict)
+                    gate["evidence"] = "docs/agent-harness/coverage-matrix.md"
+                else:
+                    approval_path = root / "docs/agent-harness/evidence/production-approval.json"
+                    approval = json.loads(approval_path.read_text(encoding="utf-8"))
+                    approval["environment"] = "ci"
+                    approval_path.write_text(json.dumps(approval), encoding="utf-8")
+                put(root, harness.CERTIFICATION_REL, json.dumps(manifest))
+                report = harness.Report(command="certify", root=str(root))
+                harness.validate_certification(
+                    report,
+                    root,
+                    dict(harness.DEFAULT_AUTHORITIES),
+                    "adaptive",
+                    CERT_COMMIT,
+                    now=CERT_NOW,
+                )
+                ids = {item.id for item in report.findings}
+                expected = {"triggers": "CERT006", "native": "CERT008", "approval": "CERT008"}
+                self.assertIn(expected[case], ids)
+
+    def test_cli_certify_is_structured_and_fails_closed_on_audit_warnings(self) -> None:
+        temporary, root = self.make_root()
+        self.addCleanup(temporary.cleanup)
+        install_valid_certification(root)
+        result = self.run_cli(
+            "certify",
+            "--root",
+            str(root),
+            "--allow-non-git",
+            "--profile",
+            "adaptive",
+            "--commit",
+            CERT_COMMIT,
+            "--format",
+            "json",
+        )
+        self.assertEqual(1, result.returncode)
+        payload = json.loads(result.stdout)
+        self.assertEqual("certify", payload["command"])
+        self.assertGreater(payload["summary"]["warnings"], 0)
+        self.assertNotIn("CERT000", {item["id"] for item in payload["findings"]})
 
     def test_skill_metadata_and_source_tree_are_release_clean(self) -> None:
         skill_text = (harness.SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")

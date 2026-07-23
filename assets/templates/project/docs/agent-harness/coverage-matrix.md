@@ -4,10 +4,10 @@ Use this matrix to prove that the repository implements every applicable harness
 
 ## Status contract
 
-- `verified`: the artifact and behavior were exercised with recorded evidence.
+- `verified`: the artifact and behavior were exercised with recorded evidence. For production certification, link the status cell to a fresh commit-bound v1 evidence record.
 - `candidate`: the proposed implementation exists but has not been exercised.
 - `blocked`: a named dependency or authority prevents completion.
-- `N/A`: the capability is genuinely irrelevant, with a written reason.
+- `N/A`: the capability is genuinely irrelevant, with a written reason. For production certification, link the status cell to a fresh applicability record.
 
 ## Coverage
 

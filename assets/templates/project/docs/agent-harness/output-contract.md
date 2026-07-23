@@ -19,7 +19,7 @@ Use this contract for implementation handoffs. More local or risk-specific instr
 | `blocked` | A named condition prevented required progress or verification. |
 | `candidate-only` | The change or command is plausible but lacks required evidence. |
 | `release pending` | Local work is complete, but release or deployment evidence does not exist. |
-| `production-ready` | All project-defined production gates have recorded evidence; do not infer this from local checks. |
+| `production-ready` | The non-expired commit-bound certification, every coverage row, the project-native gate, production authority, and rollback evidence all pass; do not infer this from installation or local checks. |
 
 ## Handoff shape
 

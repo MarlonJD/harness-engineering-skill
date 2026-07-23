@@ -1,6 +1,6 @@
 ---
 name: apply-harness-engineering
-description: Audit, install, repair, or evolve an explicit OpenAI-style repository harness with concise AGENTS.md routing, versioned knowledge, managed ExecPlans, verification and observability contracts, mechanical guardrails, and entropy maintenance. Use for requests that explicitly mention harness engineering, an agent-first or agent-readable repository, repository knowledge maps, docs/agent-harness, managed docs/exec-plans lifecycle, or authoring, executing, resuming, migrating, and completing an ExecPlan under that lifecycle. Do not use for ordinary feature work, one-off informal planning, generic CI/testing, generic documentation cleanup, or code review unless the user also asks to establish or use the repository harness.
+description: Audit, install, repair, converge, continuously maintain, or certify an explicit OpenAI-style repository harness with concise AGENTS.md routing, versioned knowledge, managed ExecPlans, verification and observability contracts, mechanical guardrails, production evidence, and entropy maintenance. Use for requests that explicitly mention harness engineering, an agent-first or agent-readable repository, repository knowledge maps, docs/agent-harness, production-ready harness adoption, continuous harness maintenance, managed docs/exec-plans lifecycle, or authoring, executing, resuming, migrating, and completing an ExecPlan under that lifecycle. Do not use for ordinary feature work, one-off informal planning, generic CI/testing, generic documentation cleanup, or code review unless the user also asks to establish or use the repository harness.
 ---
 
 # Apply Harness Engineering
@@ -14,6 +14,8 @@ Build the smallest project-specific system that lets an agent discover intent, e
 - For a complex implementation, create or resume an ExecPlan and keep it current while working.
 - For plan lifecycle work, resolve the configured ExecPlan index first; create plans in its sibling `active/` directory and move verified plans to its sibling `completed/` directory. The bundled default is `docs/exec-plans/`.
 - For sustained hardening, add mechanical checks, agent-readable runtime signals, documentation gardening, and entropy cleanup in risk-appropriate increments.
+- For fully adopted or production-ready requests, use the automatic convergence loop in [certification-and-convergence.md](references/certification-and-convergence.md). Continue through project-specific implementation and evidence capture; do not stop at installation or scaffolding.
+- For an existing production-ready claim, validate its trusted commit, evidence freshness, project-native maintenance gate, production authority, and rollback path. Treat any drift or expiry as loss of certification until re-evidenced.
 
 ## Execute the workflow
 
@@ -52,7 +54,16 @@ Build the smallest project-specific system that lets an agent discover intent, e
 7. Verify and report literally.
    - Run project-native checks and `python3 <skill-dir>/scripts/harness.py check --root <repo>`. Any adoption-complete claim must add `--warnings-as-errors`: use `--profile <standard|full>` for an adopted canonical profile, or adaptive checking with explicitly mapped authorities for a custom shape. A custom shape also requires its project-native checker and a mapped coverage matrix that retains every bundled capability inventory row; paths may vary, capability coverage may not be silently omitted. Never infer full adoption from an adaptive zero-error discovery report alone.
    - Distinguish `verified locally`, `not run`, `blocked`, `candidate-only`, `release pending`, and `production-ready`.
+   - Before saying `production-ready`, read [certification-and-convergence.md](references/certification-and-convergence.md), obtain the current commit from a trusted source-control or CI context, and run `python3 <skill-dir>/scripts/harness.py certify --root <repo> --profile <adaptive|standard|full> --commit <trusted-current-commit>`. This gate treats every warning as failure and never accepts installation as adoption evidence.
    - Report changed artifacts, verification evidence, remaining gaps, and the next highest-leverage harness improvement.
+
+## Converge automatically
+
+- Treat an authorized request to make the harness fully ready as authorization for ordinary reversible repository-local discovery, implementation, testing, evidence capture, and maintenance wiring. Infer stack-specific choices from existing manifests, commands, CI, and architecture; preserve existing authorities and conventions.
+- Create or resume an ExecPlan, then iterate `audit -> implement -> exercise -> evidence -> project-native gate -> certify` until certification passes or a concrete authority outside the request blocks progress. Do not return a successful outcome while any coverage row is missing, `candidate`, `blocked`, unjustified, stale, or unlinked to a matching evidence record.
+- Implement the durable checker and CI/scheduled triggers inside the target repository using its native language and tooling. The bundled helper remains an independent read-only bootstrap and cross-check; the target CI must not depend on the skill installation path.
+- Automatically repair safe detected drift only within existing authority. Fail closed and expose the exact blocker when remediation needs a secret, destructive action, external write, merge, release, deployment, production access, or product judgment.
+- Bind the certificate to one trusted commit and production environment, expire it within seven days, and rerun convergence after relevant changes. This continuous invalidation-and-repair contract is the operational replacement for an impossible timeless claim.
 
 ## Use the repository contract
 
@@ -79,7 +90,10 @@ docs/
 │   ├── output-contract.md
 │   ├── verification-matrix.md
 │   ├── entropy-cleanup-checklist.md
-│   └── coverage-matrix.md
+│   ├── coverage-matrix.md
+│   ├── certification.md
+│   ├── certification.json
+│   └── evidence/
 ├── exec-plans/
 │   ├── index.md
 │   ├── plan-template.md
@@ -113,7 +127,7 @@ Keep `AGENTS.md` a concise map: repository orientation, canonical links, command
 
 ## Use bundled resources
 
-- Run the read-only `scripts/harness.py` for deterministic structure, link, routing, and ExecPlan checks. Use `audit` for a non-blocking report, `check` for CI-style failure on errors, `--warnings-as-errors` for every adoption-complete gate (canonical or mapped custom), `scaffold` only as a manifest preview, and `validate-plan` as a structural/relocation completion gate. The helper never creates, edits, moves, or deletes repository files.
+- Run the read-only `scripts/harness.py` for deterministic structure, link, routing, ExecPlan, and production-certification checks. Use `audit` for a non-blocking report, `check` for CI-style failure on errors, `--warnings-as-errors` for every adoption-complete gate (canonical or mapped custom), `certify` for a warning-intolerant commit-bound production gate, `scaffold` only as a manifest preview, and `validate-plan` as a structural/relocation completion gate. The helper never creates, edits, moves, executes repository commands, or deletes repository files.
 - Add `--allow-non-git` only when the user intentionally places a non-Git project in scope; never infer a broad root.
 - Treat the bundled script as installation and maintenance tooling. Do not make a repository's CI depend on the skill installation path; implement and register a project-native durable checker before claiming mechanical or CI enforcement.
 - Apply from `assets/templates/project/` only after the scaffold preview and target inspection. Tailor every selected artifact through the controlled repository editing mechanism.
@@ -123,3 +137,4 @@ Keep `AGENTS.md` a concise map: repository orientation, canonical links, command
 - Use [repository-contract.md](references/repository-contract.md) for artifact ownership and update triggers.
 - Use [exec-plans.md](references/exec-plans.md) for official ExecPlan principles and the separate local active/completed lifecycle.
 - Use [enforcement-and-feedback.md](references/enforcement-and-feedback.md) for guardrails, observability, entropy control, and staged autonomy.
+- Use [certification-and-convergence.md](references/certification-and-convergence.md) for automatic convergence, evidence-record v1, continuous invalidation, and the bounded production-ready guarantee.

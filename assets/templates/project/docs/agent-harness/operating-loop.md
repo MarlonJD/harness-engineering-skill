@@ -24,7 +24,8 @@ Use this loop to turn human intent into a verified, durable repository change. K
 8. Review the diff, test coverage, generated artifacts, failure modes, and recovery path.
 9. Request additional agent or human review when available and justified; address findings and repeat verification.
 10. Update the ExecPlan, architecture, product knowledge, registry, debt, or enforcement rule that changed.
-11. Hand off with literal evidence labels from the output contract.
+11. If the repository carries a production-ready claim, regenerate affected evidence and rerun the project-native certificate gate for the trusted commit; otherwise invalidate the claim.
+12. Hand off with literal evidence labels from the output contract.
 
 ## Review policy decision
 
@@ -43,6 +44,7 @@ OpenAI's case study used local and cloud agent reviewers in a loop until they we
 | Repeated review finding | Fix the current change and inspect nearby occurrences | Promote a stable rule into docs, a test, linter, or structural check |
 | User-facing defect | Capture a reproducible path and validate the repair | Add acceptance evidence and update product or reliability knowledge |
 | Agent cannot proceed | Identify the missing tool, context, signal, or permission | Improve the registry/harness or escalate the judgment boundary |
+| Certificate or scheduled maintenance failure | Repair safe authorized drift, rerun affected evidence, and keep the claim failed until every gate passes | Add the reproducer, update coverage, and preserve the invalidation/recovery trace |
 
 ## Escalation boundaries
 

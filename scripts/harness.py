@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, deque
+import hashlib
 import html
 from html.entities import html5 as HTML5_ENTITIES
 from html.parser import HTMLParser
@@ -15,7 +16,7 @@ import stat
 import sys
 import tomllib
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Sequence
 from urllib.parse import unquote
@@ -29,8 +30,14 @@ MAX_COVERAGE_ROWS = 5_000
 MAX_MARKDOWN_LINK_NESTING = 64
 MARKDOWN_LINK_NESTING_SENTINEL = "\ue103HARNESS_LINK_NESTING_LIMIT\ue104"
 CONFIG_REL = "docs/agent-harness/config.json"
+CERTIFICATION_REL = "docs/agent-harness/certification.json"
 CODEX_PROJECT_CONFIG_REL = ".codex/config.toml"
 DEFAULT_PROJECT_DOC_MAX_BYTES = 32 * 1024
+MAX_CERTIFICATION_AGE_HOURS = 168
+PROJECT_GATE_CAPABILITY = "project-native-harness-gate"
+MAINTENANCE_CAPABILITY = "continuous-harness-maintenance"
+PRODUCTION_APPROVAL_CAPABILITY = "production-authority-approval"
+PRODUCTION_ROLLBACK_CAPABILITY = "production-rollback-readiness"
 
 STANDARD_FILES = (
     "AGENTS.md",
@@ -48,6 +55,9 @@ STANDARD_FILES = (
     "docs/agent-harness/verification-matrix.md",
     "docs/agent-harness/entropy-cleanup-checklist.md",
     "docs/agent-harness/coverage-matrix.md",
+    "docs/agent-harness/certification.md",
+    CERTIFICATION_REL,
+    "docs/agent-harness/evidence/.gitkeep",
     "docs/exec-plans/index.md",
     "docs/exec-plans/plan-template.md",
     "docs/exec-plans/tech-debt-tracker.md",
@@ -81,6 +91,7 @@ DEFAULT_AUTHORITIES = {
     "environment": "docs/agent-harness/environment-contract.md",
     "verification": "docs/agent-harness/verification-matrix.md",
     "coverage": "docs/agent-harness/coverage-matrix.md",
+    "certification": CERTIFICATION_REL,
 }
 
 ROUTER_CANDIDATES = (
@@ -88,6 +99,7 @@ ROUTER_CANDIDATES = (
     "docs/index.md",
     "docs/agent-harness/index.md",
     "docs/agent-harness/coverage-matrix.md",
+    "docs/agent-harness/certification.md",
     "docs/exec-plans/index.md",
     "docs/exec-plans/plan-template.md",
 )
@@ -107,6 +119,8 @@ HARNESS_INDEX_TARGETS = (
     "docs/agent-harness/verification-matrix.md",
     "docs/agent-harness/entropy-cleanup-checklist.md",
     "docs/agent-harness/coverage-matrix.md",
+    "docs/agent-harness/certification.md",
+    CERTIFICATION_REL,
     "docs/exec-plans/index.md",
     "docs/exec-plans/tech-debt-tracker.md",
 )
@@ -2674,6 +2688,594 @@ def validate_coverage(
             )
 
 
+def parse_certification_instant(value: object) -> datetime | None:
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", value) is None
+    ):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def substantive_certification_string(value: object, minimum: int = 8) -> bool:
+    return (
+        isinstance(value, str)
+        and substantive_length(value) >= minimum
+        and not has_unresolved_marker(value)
+        and not contains_raw_html_markup(value)
+    )
+
+
+def certification_json_object(
+    root: Path,
+    path: Path,
+) -> tuple[dict[str, object] | None, str | None]:
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key {key!r}")
+            result[key] = value
+        return result
+
+    try:
+        payload = json.loads(
+            read_text_safe(root, path),
+            object_pairs_hook=unique_object,
+        )
+    except (ValueError, OSError, SafeRefusal) as exc:
+        return None, f"could not be read as safe JSON: {exc}"
+    if not isinstance(payload, dict):
+        return None, "must be a JSON object"
+    return payload, None
+
+
+def certification_evidence_target(
+    root: Path,
+    evidence_root: Path,
+    raw_path: object,
+) -> tuple[Path | None, str | None]:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None, "evidence path must be a non-empty repository-relative string"
+    try:
+        target = safe_target(root, raw_path)
+    except SafeRefusal as exc:
+        return None, str(exc)
+    try:
+        target.relative_to(evidence_root)
+    except ValueError:
+        return None, "evidence path is outside the declared evidence_root"
+    if not target.is_file() or target.is_symlink():
+        return None, "evidence path is not a regular repository file"
+    return target, None
+
+
+def evidence_record_issue(
+    root: Path,
+    path: Path,
+    *,
+    expected_capability: str,
+    expected_status: str,
+    expected_commit: str,
+    now: datetime,
+    not_after: datetime,
+    max_age_hours: int,
+    required_environment: str | None = None,
+    expected_command: str | None = None,
+) -> str | None:
+    payload, issue = certification_json_object(root, path)
+    if issue is not None or payload is None:
+        return issue
+    required_keys = {
+        "schema_version",
+        "repository_commit",
+        "capabilities",
+        "environment",
+        "command",
+        "exit_code",
+        "observed_at",
+        "result",
+        "artifacts",
+    }
+    if set(payload) != required_keys:
+        return "evidence record keys do not exactly match the v1 schema"
+    if payload.get("schema_version") != 1:
+        return "evidence record schema_version is not 1"
+    commit = payload.get("repository_commit")
+    if not isinstance(commit, str) or commit.casefold() != expected_commit.casefold():
+        return "evidence record is not bound to the certified commit"
+    capabilities = payload.get("capabilities")
+    if not isinstance(capabilities, list) or not capabilities:
+        return "evidence record capabilities must be a non-empty array"
+    normalized_capabilities = {
+        normalize_coverage_identity(value)
+        for value in capabilities
+        if isinstance(value, str)
+    }
+    if normalize_coverage_identity(expected_capability) not in normalized_capabilities:
+        return "evidence record does not name the covered capability"
+    environment = payload.get("environment")
+    if not substantive_certification_string(environment, 2):
+        return "evidence record environment is missing or non-substantive"
+    if (
+        required_environment is not None
+        and isinstance(environment, str)
+        and environment.casefold() != required_environment.casefold()
+    ):
+        return f"evidence record environment is not {required_environment}"
+    command = payload.get("command")
+    if not substantive_certification_string(command):
+        return "evidence record command or review procedure is missing"
+    if expected_command is not None and command != expected_command:
+        return "evidence record command does not match the certification manifest"
+    observed_at = parse_certification_instant(payload.get("observed_at"))
+    if observed_at is None:
+        return "evidence record observed_at is not a UTC RFC3339 instant"
+    age_seconds = (now - observed_at).total_seconds()
+    if age_seconds < 0:
+        return "evidence record observed_at is in the future"
+    if observed_at > not_after:
+        return "evidence record was observed after the certificate was issued"
+    if age_seconds > max_age_hours * 3600:
+        return "evidence record is older than the certification freshness window"
+    result = payload.get("result")
+    exit_code = payload.get("exit_code")
+    expected_result = "passed" if expected_status == "verified" else "not-applicable"
+    if result != expected_result:
+        return f"evidence record result must be {expected_result}"
+    if expected_status == "verified" and exit_code != 0:
+        return "verified evidence must record exit_code 0"
+    if expected_status == "n/a" and exit_code is not None:
+        return "not-applicable evidence must record a null exit_code"
+    artifacts = payload.get("artifacts")
+    if (
+        not isinstance(artifacts, list)
+        or not artifacts
+        or not all(substantive_certification_string(item) for item in artifacts)
+    ):
+        return "evidence record artifacts must contain substantive immutable IDs, paths, or URLs"
+    return None
+
+
+def linked_certification_evidence(
+    root: Path,
+    coverage_path: Path,
+    evidence_root: Path,
+    row: CoverageRow,
+    *,
+    status: str,
+    expected_commit: str,
+    now: datetime,
+    not_after: datetime,
+    max_age_hours: int,
+    required_environment: str | None = None,
+) -> tuple[Path | None, list[str]]:
+    issues: list[str] = []
+    for destination in markdown_navigation_destinations(row.status_cell):
+        resolved, resolution_issue = resolve_markdown_link(root, coverage_path, destination)
+        if resolution_issue is not None or resolved is None:
+            issues.append(resolution_issue or "link is not repository-local")
+            continue
+        try:
+            relative = resolved.relative_to(root)
+            target = safe_target(root, relative.as_posix())
+            target.relative_to(evidence_root)
+        except (ValueError, SafeRefusal) as exc:
+            issues.append(str(exc) or "link is outside evidence_root")
+            continue
+        if not target.is_file() or target.is_symlink():
+            issues.append("linked evidence is not a regular repository file")
+            continue
+        issue = evidence_record_issue(
+            root,
+            target,
+            expected_capability=row.identity,
+            expected_status=status,
+            expected_commit=expected_commit,
+            now=now,
+            not_after=not_after,
+            max_age_hours=max_age_hours,
+            required_environment=required_environment,
+        )
+        if issue is None:
+            return target, issues
+        issues.append(issue)
+    if not issues:
+        issues.append("status cell has no repository-local evidence link")
+    return None, issues
+
+
+def validate_named_certification_evidence(
+    report: Report,
+    root: Path,
+    evidence_root: Path,
+    raw_path: object,
+    *,
+    label: str,
+    capability: str,
+    expected_commit: str,
+    now: datetime,
+    not_after: datetime,
+    max_age_hours: int,
+    required_environment: str | None = None,
+    expected_command: str | None = None,
+) -> None:
+    target, issue = certification_evidence_target(root, evidence_root, raw_path)
+    if issue is None and target is not None:
+        issue = evidence_record_issue(
+            root,
+            target,
+            expected_capability=capability,
+            expected_status="verified",
+            expected_commit=expected_commit,
+            now=now,
+            not_after=not_after,
+            max_age_hours=max_age_hours,
+            required_environment=required_environment,
+            expected_command=expected_command,
+        )
+    if issue is not None:
+        report.add(
+            "CERT008",
+            "error",
+            str(raw_path) if isinstance(raw_path, str) else CERTIFICATION_REL,
+            f"{label} evidence is invalid: {issue}.",
+            "Record a fresh v1 evidence JSON file inside evidence_root and bind it to the certified commit.",
+        )
+
+
+def validate_certification(
+    report: Report,
+    root: Path,
+    authorities: dict[str, str],
+    profile: str,
+    expected_commit: str,
+    *,
+    now: datetime | None = None,
+) -> None:
+    root = resolve_safe_directory(root)
+    now = now or datetime.now(timezone.utc)
+    certification_path = safe_target(root, authorities["certification"])
+    rel = relative_display(root, certification_path)
+    if not certification_path.is_file() or certification_path.is_symlink():
+        report.add(
+            "CERT001",
+            "error",
+            rel,
+            "Production certification manifest is missing or unsafe.",
+            "Create and tailor the configured v1 certification manifest before making a production-ready claim.",
+        )
+        return
+    payload, issue = certification_json_object(root, certification_path)
+    if issue is not None or payload is None:
+        report.add(
+            "CERT001",
+            "error",
+            rel,
+            f"Production certification manifest {issue}.",
+            "Restore a regular UTF-8 JSON v1 manifest.",
+        )
+        return
+    required_keys = {
+        "schema_version",
+        "claim",
+        "profile",
+        "repository_commit",
+        "environment",
+        "issued_at",
+        "expires_at",
+        "coverage_sha256",
+        "evidence_root",
+        "project_native_gate",
+        "maintenance",
+        "production_authority",
+    }
+    if set(payload) != required_keys or payload.get("schema_version") != 1:
+        report.add(
+            "CERT002",
+            "error",
+            rel,
+            "Certification manifest does not exactly match the v1 top-level schema.",
+            "Keep every required v1 field once and remove unknown top-level fields.",
+        )
+        return
+    if payload.get("claim") != "production-ready":
+        report.add(
+            "CERT003",
+            "error",
+            rel,
+            "Certification claim is not production-ready.",
+            "Use candidate-only until every certification gate has fresh evidence.",
+        )
+    if payload.get("profile") != profile:
+        report.add(
+            "CERT003",
+            "error",
+            rel,
+            "Certification profile does not match the invoked profile.",
+            "Run the declared profile or update and re-evidence the manifest deliberately.",
+        )
+    commit = payload.get("repository_commit")
+    if (
+        not isinstance(commit, str)
+        or re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", commit) is None
+        or commit.casefold() != expected_commit.casefold()
+    ):
+        report.add(
+            "CERT004",
+            "error",
+            rel,
+            "Certification is not bound to the trusted current commit assertion.",
+            "Pass the trusted CI commit to --commit and regenerate all evidence for that exact revision.",
+        )
+        return
+    if payload.get("environment") != "production":
+        report.add(
+            "CERT003",
+            "error",
+            rel,
+            "A production-ready certificate must target the production environment.",
+            "Keep local or staging evidence scoped to its literal label; certify production separately.",
+        )
+    issued_at = parse_certification_instant(payload.get("issued_at"))
+    expires_at = parse_certification_instant(payload.get("expires_at"))
+    if (
+        issued_at is None
+        or expires_at is None
+        or issued_at > now
+        or expires_at <= now
+        or expires_at <= issued_at
+    ):
+        report.add(
+            "CERT005",
+            "error",
+            rel,
+            "Certification timestamps are invalid, future-issued, or expired.",
+            "Use UTC RFC3339 instants and issue a fresh bounded certificate after rerunning evidence.",
+        )
+
+    maintenance = payload.get("maintenance")
+    maintenance_keys = {"command", "triggers", "max_age_hours", "evidence"}
+    max_age_hours = 0
+    if not isinstance(maintenance, dict) or set(maintenance) != maintenance_keys:
+        report.add(
+            "CERT006",
+            "error",
+            rel,
+            "Maintenance contract does not exactly match the v1 schema.",
+            "Declare command, pull-request/push/schedule triggers, max_age_hours, and evidence.",
+        )
+    else:
+        raw_age = maintenance.get("max_age_hours")
+        if not isinstance(raw_age, int) or isinstance(raw_age, bool) or not 1 <= raw_age <= MAX_CERTIFICATION_AGE_HOURS:
+            report.add(
+                "CERT006",
+                "error",
+                rel,
+                f"Maintenance max_age_hours must be between 1 and {MAX_CERTIFICATION_AGE_HOURS}.",
+                "Choose a bounded freshness window and schedule re-certification within it.",
+            )
+        else:
+            max_age_hours = raw_age
+            if issued_at is not None and expires_at is not None and (expires_at - issued_at).total_seconds() > raw_age * 3600:
+                report.add(
+                    "CERT005",
+                    "error",
+                    rel,
+                    "Certification lifetime exceeds the declared maintenance freshness window.",
+                    "Expire the certificate no later than max_age_hours after issuance.",
+                )
+        triggers = maintenance.get("triggers")
+        if not isinstance(triggers, list) or not {"pull_request", "push", "schedule"}.issubset(
+            {item for item in triggers if isinstance(item, str)}
+        ):
+            report.add(
+                "CERT006",
+                "error",
+                rel,
+                "Continuous maintenance is not triggered on pull requests, pushes, and a schedule.",
+                "Wire the project-native gate to all three triggers so drift invalidates the claim.",
+            )
+        if not substantive_certification_string(maintenance.get("command")):
+            report.add(
+                "CERT006",
+                "error",
+                rel,
+                "Maintenance command is missing or unresolved.",
+                "Record the exact repository-native convergence or certification command.",
+            )
+
+    evidence_root_value = payload.get("evidence_root")
+    evidence_root: Path | None = None
+    if isinstance(evidence_root_value, str):
+        try:
+            evidence_root = safe_target(root, evidence_root_value)
+        except SafeRefusal:
+            evidence_root = None
+    if evidence_root is None or not evidence_root.is_dir() or evidence_root.is_symlink():
+        report.add(
+            "CERT007",
+            "error",
+            rel,
+            "Declared evidence_root is missing, unsafe, or not a repository directory.",
+            "Use a regular repository-relative directory containing commit-bound evidence records.",
+        )
+        return
+    if max_age_hours == 0:
+        return
+    evidence_not_after = issued_at or now
+
+    coverage_path = safe_target(root, authorities["coverage"])
+    if not coverage_path.is_file() or coverage_path.is_symlink():
+        report.add(
+            "CERT007",
+            "error",
+            relative_display(root, coverage_path),
+            "Configured coverage matrix is missing or unsafe.",
+            "Restore the complete canonical inventory before certifying production readiness.",
+        )
+        return
+    try:
+        coverage_bytes = read_bytes_safe(root, coverage_path)
+        coverage_text = coverage_bytes.decode("utf-8")
+    except (UnicodeDecodeError, OSError, SafeRefusal) as exc:
+        report.add(
+            "CERT007",
+            "error",
+            relative_display(root, coverage_path),
+            f"Coverage matrix cannot be bound safely: {exc}.",
+            "Restore a regular UTF-8 matrix and rerun certification.",
+        )
+        return
+    digest = payload.get("coverage_sha256")
+    actual_digest = hashlib.sha256(coverage_bytes).hexdigest()
+    if not isinstance(digest, str) or digest.casefold() != actual_digest:
+        report.add(
+            "CERT007",
+            "error",
+            rel,
+            "coverage_sha256 does not match the configured coverage matrix.",
+            "Rerun every affected capability and bind the certificate to the current matrix digest.",
+        )
+    rows, _, _, _ = coverage_table_rows(coverage_text)
+    production_identity = normalize_coverage_identity(
+        "Release, deployment, and production actions require repository-local authority"
+    )
+    for row in rows:
+        status, _ = parse_coverage_status(row.status_cell)
+        if status not in {"verified", "n/a"}:
+            continue
+        identity = normalize_coverage_identity(row.identity)
+        if identity == production_identity and status != "verified":
+            report.add(
+                "CERT009",
+                "error",
+                relative_display(root, coverage_path),
+                "The release/deployment/production authority capability cannot be N/A for a production-ready claim.",
+                "Exercise the project-specific authority, rollback, and audit path and mark it verified.",
+            )
+            continue
+        required_environment = "production" if identity == production_identity else None
+        evidence, issues = linked_certification_evidence(
+            root,
+            coverage_path,
+            evidence_root,
+            row,
+            status=status,
+            expected_commit=commit,
+            now=now,
+            not_after=evidence_not_after,
+            max_age_hours=max_age_hours,
+            required_environment=required_environment,
+        )
+        if evidence is None:
+            report.add(
+                "CERT009",
+                "error",
+                relative_display(root, coverage_path),
+                f"Coverage row {row.line} has no valid fresh commit-bound evidence: {'; '.join(issues[:3])}.",
+                "Link its status cell to a matching v1 evidence record inside evidence_root.",
+            )
+
+    project_gate = payload.get("project_native_gate")
+    project_gate_keys = {"command", "evidence"}
+    if not isinstance(project_gate, dict) or set(project_gate) != project_gate_keys or not substantive_certification_string(project_gate.get("command")):
+        report.add(
+            "CERT010",
+            "error",
+            rel,
+            "Project-native gate does not exactly declare a substantive command and evidence path.",
+            "Implement a durable repository-native gate; the installed skill path may not be the CI dependency.",
+        )
+    else:
+        validate_named_certification_evidence(
+            report,
+            root,
+            evidence_root,
+            project_gate.get("evidence"),
+            label="Project-native gate",
+            capability=PROJECT_GATE_CAPABILITY,
+            expected_commit=commit,
+            now=now,
+            not_after=evidence_not_after,
+            max_age_hours=max_age_hours,
+            expected_command=project_gate.get("command"),
+        )
+    if isinstance(maintenance, dict) and substantive_certification_string(maintenance.get("command")):
+        validate_named_certification_evidence(
+            report,
+            root,
+            evidence_root,
+            maintenance.get("evidence"),
+            label="Continuous maintenance",
+            capability=MAINTENANCE_CAPABILITY,
+            expected_commit=commit,
+            now=now,
+            not_after=evidence_not_after,
+            max_age_hours=max_age_hours,
+            expected_command=maintenance.get("command"),
+        )
+
+    authority = payload.get("production_authority")
+    authority_keys = {"owner", "approval_evidence", "rollback_evidence"}
+    if not isinstance(authority, dict) or set(authority) != authority_keys or not is_substantive_owner(str(authority.get("owner", ""))):
+        report.add(
+            "CERT011",
+            "error",
+            rel,
+            "Production authority does not exactly declare a substantive owner and approval/rollback evidence.",
+            "Name the durable production owner and record both exercised authority and rollback evidence.",
+        )
+    else:
+        validate_named_certification_evidence(
+            report,
+            root,
+            evidence_root,
+            authority.get("approval_evidence"),
+            label="Production approval",
+            capability=PRODUCTION_APPROVAL_CAPABILITY,
+            expected_commit=commit,
+            now=now,
+            not_after=evidence_not_after,
+            max_age_hours=max_age_hours,
+            required_environment="production",
+        )
+        validate_named_certification_evidence(
+            report,
+            root,
+            evidence_root,
+            authority.get("rollback_evidence"),
+            label="Production rollback",
+            capability=PRODUCTION_ROLLBACK_CAPABILITY,
+            expected_commit=commit,
+            now=now,
+            not_after=evidence_not_after,
+            max_age_hours=max_age_hours,
+            required_environment="production",
+        )
+
+
+def certify_repository(root: Path, profile: str, expected_commit: str) -> Report:
+    report = audit_repository(root, profile, "certify")
+    authorities = load_authorities(root, report)
+    validate_certification(report, root, authorities, profile, expected_commit)
+    if not any(item.severity in {"error", "warning"} for item in report.findings):
+        report.add(
+            "CERT000",
+            "info",
+            authorities["certification"],
+            "Production-ready certification is current for the asserted commit and bounded freshness window.",
+            "Keep project-native pull-request, push, and scheduled maintenance gates active; any drift requires re-certification.",
+        )
+    return report.normalized()
+
+
 def index_has_table(
     text: str,
     heading: str,
@@ -4085,6 +4687,17 @@ def build_parser() -> argparse.ArgumentParser:
     add_root_options(check)
     check.add_argument("--warnings-as-errors", action="store_true")
 
+    certify = subparsers.add_parser(
+        "certify",
+        help="Fail-closed production-readiness validation bound to a trusted commit",
+    )
+    add_root_options(certify)
+    certify.add_argument(
+        "--commit",
+        required=True,
+        help="Trusted current Git commit from the invoking CI or source-control context",
+    )
+
     scaffold = subparsers.add_parser(
         "scaffold", help="Read-only manifest preview for a deliberately selected profile"
     )
@@ -4151,6 +4764,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             if summary["errors"] or (args.warnings_as_errors and summary["warnings"]):
                 return 1
             return 0
+        if args.command == "certify":
+            report = certify_repository(root, args.profile, args.commit)
+            print_report(report, args.format)
+            summary = report.summary()
+            return 1 if summary["errors"] or summary["warnings"] else 0
         if args.command == "scaffold":
             report = scaffold_preview(root, args.profile)
             print_report(report, args.format)

@@ -25,6 +25,9 @@ Keep one authoritative home for each kind of knowledge. Link from indexes instea
 | `docs/agent-harness/verification-matrix.md` | Requirement-to-check-to-evidence mapping | A surface, risk, or verification path changes |
 | `docs/agent-harness/entropy-cleanup-checklist.md` | Recurring drift checks and escalation rules | A recurring anti-pattern or cleanup loop changes |
 | `docs/agent-harness/coverage-matrix.md` | Source-principle-to-artifact-to-evidence traceability | A harness capability is added, removed, or reclassified |
+| `docs/agent-harness/certification.md` | Repository-specific convergence, invalidation, and production-certification policy | The native gate, CI triggers, repair authority, or certificate consumer changes |
+| `docs/agent-harness/certification.json` | Commit-, environment-, coverage-, and freshness-bound production claim | Any bound commit, evidence, coverage digest, authority, or freshness window changes |
+| `docs/agent-harness/evidence/` | Structured observed evidence records referenced by coverage and certification | A capability is exercised, reclassified, invalidated, or re-certified |
 
 ## Navigation rules
 
@@ -36,6 +39,7 @@ Keep one authoritative home for each kind of knowledge. Link from indexes instea
 - Record `last verified` only when a person or command can actually refresh it.
 - Mark generated documents with their source and regeneration command. Do not hand-edit generated content.
 - Use `N/A` with a reason for intentionally absent surfaces; do not leave unexplained empty sections.
+- Treat every certificate as expiring state, not durable truth. Bind it to a trusted current commit and keep production evidence under the configured repository evidence root.
 
 ## Change rules
 

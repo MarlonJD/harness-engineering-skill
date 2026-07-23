@@ -1,4 +1,4 @@
 interface:
   display_name: "Apply Harness Engineering"
-  short_description: "Build an agent-ready repository harness"
-  default_prompt: "Use $apply-harness-engineering to audit this repository and implement a proportional, verifiable agent harness."
+  short_description: "Converge and certify a production-ready harness"
+  default_prompt: "Use $apply-harness-engineering to converge this repository to a continuously maintained, commit-bound production-ready harness and fail closed on missing evidence or authority."

@@ -22,6 +22,9 @@ Run this sweep at a cadence justified by repository change rate. Keep the proces
 - [ ] Check flaky tests, stale fixtures, inaccessible logs, and nondeterministic setup/reset paths.
 - [ ] Confirm UI, API, migration, or operational evidence still matches the verification matrix.
 - [ ] Check isolation and cleanup for concurrent or long-running agent work.
+- [ ] Confirm every coverage status links to fresh evidence for the current commit.
+- [ ] Confirm the project-native certificate gate runs on pull requests, pushes, and schedule; exercise one invalidate-and-recover path.
+- [ ] Expire any production-ready claim whose commit, coverage digest, evidence, approval, rollback, or freshness window no longer matches.
 
 ## Triage
 

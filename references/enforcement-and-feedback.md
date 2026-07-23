@@ -71,3 +71,9 @@ Increase agent responsibility only when the previous level is observable and rec
 7. Merge, release, or operate production only with explicit authority and project-specific gates.
 
 High throughput does not justify weakening a gate when failures are expensive, irreversible, regulated, or difficult to detect.
+
+## Maintain a production-ready claim
+
+For a repository that requests full production certification, implement a project-native gate and run it on pull requests, pushes, and a bounded schedule. Bind evidence and the certificate to the current commit. Expire the claim within seven days or sooner, and immediately invalidate it when a required command, authority, coverage row, evidence record, production signal, or rollback path changes or fails.
+
+Automatic maintenance may repair safe repository-local drift within existing authority. It must fail closed and escalate when repair requires secrets, destructive actions, external writes, merge, release, deployment, production access, or product judgment. Re-certification is proof of recovery; suppressing or extending a failed certificate is not.

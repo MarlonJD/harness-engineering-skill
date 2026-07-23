@@ -16,6 +16,7 @@ Root [`AGENTS.md`](../../AGENTS.md) is the canonical instruction map. If root `A
 | Change-to-verification mapping | [`verification-matrix.md`](verification-matrix.md) |
 | Recurring drift cleanup | [`entropy-cleanup-checklist.md`](entropy-cleanup-checklist.md) |
 | Source-principle coverage | [`coverage-matrix.md`](coverage-matrix.md) |
+| Production certification and continuous invalidation | [`certification.md`](certification.md) and [`certification.json`](certification.json) |
 | Long-running work | [`../exec-plans/index.md`](../exec-plans/index.md) |
 
 ## Route by task
@@ -31,6 +32,7 @@ Root [`AGENTS.md`](../../AGENTS.md) is the canonical instruction map. If root `A
 | Sweep drift and technical debt | [`entropy-cleanup-checklist.md`](entropy-cleanup-checklist.md) | [`../exec-plans/tech-debt-tracker.md`](../exec-plans/tech-debt-tracker.md) or a new active plan |
 | Prepare security, reliability, release, or external work | [`output-contract.md`](output-contract.md) | [`../SECURITY.md`](../SECURITY.md), [`../RELIABILITY.md`](../RELIABILITY.md), and applicable approval rules |
 | Audit whether the harness is complete | [`coverage-matrix.md`](coverage-matrix.md) | Verify every applicable row with a repository artifact and observed evidence |
+| Converge and certify production readiness | [`certification.md`](certification.md) | Resolve every coverage row, run the project-native gate, and validate [`certification.json`](certification.json) for the trusted commit |
 
 ## Operating loop
 

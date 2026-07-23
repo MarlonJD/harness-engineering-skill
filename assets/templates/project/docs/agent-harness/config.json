@@ -8,6 +8,7 @@
     "registry": "docs/agent-harness/registry.md",
     "environment": "docs/agent-harness/environment-contract.md",
     "verification": "docs/agent-harness/verification-matrix.md",
-    "coverage": "docs/agent-harness/coverage-matrix.md"
+    "coverage": "docs/agent-harness/coverage-matrix.md",
+    "certification": "docs/agent-harness/certification.json"
   }
 }

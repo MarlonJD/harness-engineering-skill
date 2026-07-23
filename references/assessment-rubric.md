@@ -12,6 +12,8 @@ Use this rubric to diagnose capabilities, not to reward file count. Record evide
 | 3 — Enforced | CI, structural tests, schemas, or runtime checks prevent known drift. |
 | 4 — Self-maintaining | Scheduled or event-driven loops detect decay, propose repairs, and preserve evidence. |
 
+Production certification is stricter than level 4: it additionally requires a trusted commit binding, fresh per-capability evidence, an exercised production authority and rollback path, and a fail-closed project-native gate. Maturity scoring alone never implies production readiness.
+
 ## Dimensions
 
 1. **Orientation and knowledge routing**
