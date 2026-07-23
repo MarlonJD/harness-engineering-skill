@@ -2,12 +2,14 @@
 
 Use this loop to turn human intent into a verified, durable repository change. Keep authority boundaries explicit at every stage.
 
+Run this loop only after an explicit repository-scoped request or an already-authorized repository-native trigger. Installing the external skill does not start the loop, grant authority, or schedule future runs.
+
 ## Responsibilities
 
 | Role | Owns |
 | --- | --- |
 | Human | Priorities, user intent, risk tolerance, product judgment, exceptional approvals, and final acceptance where required |
-| Agent | Repository discovery, planning, implementation, local verification, self-review, evidence capture, and durable documentation updates within granted authority |
+| Agent | Repository discovery, planning, implementation, local verification, self-review, evidence capture, and durable documentation updates within granted authority; explicit blockers when authority is missing |
 | Mechanical harness | Deterministic setup, tests, lint, structural boundaries, schemas, CI feedback, and observable runtime signals |
 
 <!-- TODO(harness): Name repository-specific roles and decisions that always require human judgment. -->
@@ -24,7 +26,7 @@ Use this loop to turn human intent into a verified, durable repository change. K
 8. Review the diff, test coverage, generated artifacts, failure modes, and recovery path.
 9. Request additional agent or human review when available and justified; address findings and repeat verification.
 10. Update the ExecPlan, architecture, product knowledge, registry, debt, or enforcement rule that changed.
-11. If the repository carries a production-ready claim, regenerate affected evidence and rerun the project-native certificate gate for the trusted commit; otherwise invalidate the claim.
+11. Refresh affected HMAC-consistent v2 candidate records and rerun the project-native candidate gate for a new trusted source/direct-child attestation pair, or invalidate the candidate. Keep any requested production-ready outcome blocked by nonzero `CERT015`; local maintenance cannot supply the missing provider verifier.
 12. Hand off with literal evidence labels from the output contract.
 
 ## Review policy decision
@@ -44,7 +46,7 @@ OpenAI's case study used local and cloud agent reviewers in a loop until they we
 | Repeated review finding | Fix the current change and inspect nearby occurrences | Promote a stable rule into docs, a test, linter, or structural check |
 | User-facing defect | Capture a reproducible path and validate the repair | Add acceptance evidence and update product or reliability knowledge |
 | Agent cannot proceed | Identify the missing tool, context, signal, or permission | Improve the registry/harness or escalate the judgment boundary |
-| Certificate or scheduled maintenance failure | Repair safe authorized drift, rerun affected evidence, and keep the claim failed until every gate passes | Add the reproducer, update coverage, and preserve the invalidation/recovery trace |
+| Candidate gate or scheduled maintenance failure | Repair only safe explicitly authorized drift, refresh affected candidate records, and keep the candidate failed until every local gate passes; preserve `CERT015` | Add the reproducer, update coverage, and preserve the invalidation/recovery trace |
 
 ## Escalation boundaries
 

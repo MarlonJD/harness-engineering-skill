@@ -25,21 +25,22 @@ Keep one authoritative home for each kind of knowledge. Link from indexes instea
 | `docs/agent-harness/verification-matrix.md` | Requirement-to-check-to-evidence mapping | A surface, risk, or verification path changes |
 | `docs/agent-harness/entropy-cleanup-checklist.md` | Recurring drift checks and escalation rules | A recurring anti-pattern or cleanup loop changes |
 | `docs/agent-harness/coverage-matrix.md` | Source-principle-to-artifact-to-evidence traceability | A harness capability is added, removed, or reclassified |
-| `docs/agent-harness/certification.md` | Repository-specific convergence, invalidation, and production-certification policy | The native gate, CI triggers, repair authority, or certificate consumer changes |
-| `docs/agent-harness/certification.json` | Commit-, environment-, coverage-, and freshness-bound production claim | Any bound commit, evidence, coverage digest, authority, or freshness window changes |
-| `docs/agent-harness/evidence/` | Structured observed evidence records referenced by coverage and certification | A capability is exercised, reclassified, invalidated, or re-certified |
+| `docs/agent-harness/certification.md` | Repository-specific candidate convergence, invalidation, and the `CERT015` external-verifier blocker | The native gate, CI triggers, repair authority, or future verifier boundary changes |
+| `docs/agent-harness/certification.json` | Source-commit-, repository-, target-, environment-, coverage-, and freshness-bound `candidate-only` manifest carried in a direct-child attestation commit | Any bound commit, identity, record, coverage digest, or freshness window changes |
+| `docs/agent-harness/evidence/` | HMAC-consistent v2 candidate observation records referenced by coverage and the manifest; not externally authenticated production proof | A capability is exercised, reclassified, invalidated, or refreshed |
 
 ## Navigation rules
 
 - Keep the effective root entry point inside Codex's instruction-load budget. Codex tries a non-empty root `AGENTS.override.md`, then non-empty root `AGENTS.md`, then each configured `project_doc_fallback_filenames` entry in order; all critical routes must be present before the byte cutoff. The default `project_doc_max_bytes` is 32 KiB, and more local project instructions consume the effective root-to-working-directory chain. Prefer links over embedded essays, and require runtime evidence that the repository config is trusted and effective before relying on configured fallbacks.
-- Treat `.codex/config.toml` as a Codex configuration layer, not a harness authority map. Project configuration is trust-dependent and may be overridden by user, profile, nested project, or CLI layers. A repository-declared budget above 32 KiB requires runtime effective-config and instruction-load evidence; the bundled static checker remains conservative at 32 KiB.
+- Treat `.codex/config.toml` as a Codex configuration layer, not a harness authority map. Project configuration is trust-dependent and may be overridden by user, profile, nested project, or CLI layers. A repository-declared budget above 32 KiB requires runtime effective-config and instruction-load evidence; the bundled static checker remains conservative at 32 KiB. Run the helper with Python 3.11+ when this TOML file exists; older Python emits fail-closed `CODEXCFG001` because `tomllib` is unavailable.
 - Use repository-relative links and verify them mechanically.
 - Add an index to every collection whose members change over time.
 - Name owners as roles or teams when individuals would make the document decay quickly.
 - Record `last verified` only when a person or command can actually refresh it.
 - Mark generated documents with their source and regeneration command. Do not hand-edit generated content.
 - Use `N/A` with a reason for intentionally absent surfaces; do not leave unexplained empty sections.
-- Treat every certificate as expiring state, not durable truth. Bind it to a trusted current commit and keep production evidence under the configured repository evidence root.
+- Treat every candidate manifest as expiring state, not durable truth. Bind HMAC-consistent v2 records and the manifest to source commit `S`, bind verification to clean direct-child attestation commit `A`, and keep candidate records under the configured repository evidence root. Any later commit invalidates `A`; the bundled verifier still returns `CERT015` because these records are not provider-authenticated production proof.
+- Treat the installed skill as external tooling, not a repository lifecycle service. Installation alone creates no repository files, CI gate, scheduled invalidation, evidence, certificate, or repair authority.
 
 ## Change rules
 

@@ -56,7 +56,7 @@ At completion, update `status`, `updated`, and `completed` in the same controlle
 2. Update progress, discoveries, decisions, validation evidence, and revision history at every stopping point.
 3. Keep blocked or paused plans in `active/` with an explicit blocker and recovery condition.
 4. Before completion, run applicable acceptance checks, resolve placeholders, write the retrospective, and account for remaining work.
-5. Record the final semantic review as an indented continuation of the last structured Revision History entry: `Semantic-Review: reviewer=<role-or-team>; reviewed-at=<YYYY-MM-DD HH:MMZ>; evidence=<substantive observed review evidence>`. This is the repository-local durable attestation; it is not a built-in Codex protocol.
+5. Record the final semantic review as one visible indented continuation of the last structured Revision History entry: `Semantic-Review: reviewer=<role-or-team>; reviewed-at=<YYYY-MM-DD HH:MMZ>; content-sha256=<64-lowercase-hex>; evidence=<substantive observed review evidence>`. Hash the exact UTF-8 plan bytes after removing that entire attestation line, including its line ending. Use a review time no earlier than the final revision entry and no later than the current UTC time.
 6. Run the active completion gate with `--semantic-review`, move the same file to the configured index's sibling `completed/` directory, and update the index in the same change.
 7. Validate the completed state again with `--semantic-review` and run the repository-native check. Completed location never substitutes for the explicit assertion or recorded attestation.
 
@@ -71,6 +71,8 @@ At completion, update `status`, `updated`, and `completed` in the same controlle
 - Internal links resolve after the move.
 - A semantic reviewer confirms that the plan is self-contained, `owner` identifies a real durable role or team, milestones are meaningful, behavior is observable, and evidence is sufficient; structural validation rejects known placeholders and sentinels but cannot prove natural-language meaning.
 - The final Revision History entry persists that review with the exact local `Semantic-Review:` continuation format above, and both active and completed `validate-plan` invocations pass `--semantic-review` explicitly.
+
+`content-sha256` detects an edit after the recorded review; it does not authenticate `reviewer`. A repository writer can replace the line and recompute the digest. Never use this local consistency check as human approval, external review authority, or signed production evidence.
 
 ## Repository-local strict schema
 

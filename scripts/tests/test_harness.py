@@ -24,6 +24,11 @@ harness = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = harness
 SPEC.loader.exec_module(harness)
 
+try:
+    from .test_certification_security import CertificationFixture
+except ImportError:
+    from test_certification_security import CertificationFixture
+
 
 def put(root: Path, rel: str, text: str) -> Path:
     path = root / rel
@@ -86,6 +91,26 @@ def index_with_completed(
     )
 
 
+def refresh_semantic_review_digest(text: str) -> str:
+    attestation_line = next(
+        (
+            line
+            for line in text.splitlines(keepends=True)
+            if "Semantic-Review:" in line
+        ),
+        None,
+    )
+    if attestation_line is None:
+        return text
+    digest = hashlib.sha256(text.replace(attestation_line, "", 1).encode()).hexdigest()
+    return re.sub(
+        r"content-sha256=[0-9a-fA-F]{64}",
+        f"content-sha256={digest}",
+        text,
+        count=1,
+    )
+
+
 def plan_text(
     slug: str = "safe-plan",
     *,
@@ -97,15 +122,17 @@ def plan_text(
     extra_artifacts: str = "The focused and broad evidence is recorded below.",
     semantic_attestation: bool = True,
 ) -> str:
+    digest_placeholder = "0" * 64
     semantic_review = (
         "\n  Semantic-Review: reviewer=platform-team; "
         "reviewed-at=2026-07-22 10:30Z; "
+        f"content-sha256={digest_placeholder}; "
         "evidence=Confirmed self-containment, ownership, milestones, observable "
         "behavior, recovery, and recorded acceptance evidence."
         if semantic_attestation
         else ""
     )
-    return f"""<!-- harness-plan:v1
+    text = f"""<!-- harness-plan:v1
 id: {slug}
 status: {state}
 created: {created}
@@ -171,6 +198,9 @@ The stable interfaces are the repository-local validation command, Markdown auth
 - (2026-07-22 10:30Z) Change: Recorded final scoped evidence. Reason: Make completion restartable and auditable.
 {semantic_review}
 """
+    if semantic_attestation:
+        text = refresh_semantic_review_digest(text)
+    return text
 
 
 def tree_fingerprint(root: Path) -> dict[str, str]:
@@ -215,7 +245,7 @@ def evidence_record(
     )
 
 
-def install_valid_certification(root: Path) -> dict[str, object]:
+def install_legacy_v1_production_claim_fixture(root: Path) -> dict[str, object]:
     template = (
         harness.TEMPLATE_ROOT / "docs/agent-harness/coverage-matrix.md"
     ).read_text(encoding="utf-8")
@@ -501,7 +531,9 @@ class HarnessTests(unittest.TestCase):
         put(
             root,
             "planning/exec-plans/active/safe-plan.md",
-            plan_text().replace("../../PLANS.md", "../../PLAN_POLICY.md"),
+            refresh_semantic_review_digest(
+                plan_text().replace("../../PLANS.md", "../../PLAN_POLICY.md")
+            ),
         )
         (root / "planning/exec-plans/completed").mkdir(parents=True)
         put(
@@ -1224,6 +1256,7 @@ _None._
         payload = json.loads(result.stdout)
         self.assertIn("CONFIG002", {item["id"] for item in payload["findings"]})
 
+    @unittest.skipIf(harness.tomllib is None, "requires stdlib tomllib")
     def test_adaptive_discovery_honors_configured_instruction_fallback(self) -> None:
         temporary, root = self.make_root()
         self.addCleanup(temporary.cleanup)
@@ -1318,6 +1351,7 @@ _None._
         self.assertIn("DOC003", ids)
         self.assertNotIn("ROUTE002", ids)
 
+    @unittest.skipIf(harness.tomllib is None, "requires stdlib tomllib")
     def test_repository_instruction_budget_can_only_tighten_static_routing(self) -> None:
         for declared, filler_size, expected_info in (
             (1024, 1500, False),
@@ -1354,6 +1388,7 @@ _None._
                 self.assertIn("ROUTE002", ids)
                 self.assertEqual(expected_info, "CODEXCFG002" in ids)
 
+    @unittest.skipIf(harness.tomllib is None, "requires stdlib tomllib")
     def test_invalid_project_instruction_budgets_fail_closed(self) -> None:
         invalid_values = ("true", "1.5", '"1024"', "0", "-1", "[")
         for value in invalid_values:
@@ -1371,6 +1406,7 @@ _None._
                     "CODEXCFG001", {item.id for item in report.findings}
                 )
 
+    @unittest.skipIf(harness.tomllib is None, "requires stdlib tomllib")
     def test_instruction_budget_uses_effective_override_and_utf8_prefix(self) -> None:
         temporary, root = self.make_root()
         self.addCleanup(temporary.cleanup)
@@ -1713,17 +1749,10 @@ _None._
         temporary, root = self.make_root()
         self.addCleanup(temporary.cleanup)
         self.install_plan_lifecycle(root)
-        attestation = (
-            "\n  Semantic-Review: reviewer=platform-team; "
-            "reviewed-at=2026-07-22 10:30Z; "
-            "evidence=Confirmed self-containment, ownership, milestones, "
-            "observable behavior, recovery, and recorded acceptance evidence."
-        )
         completed = plan_text(
             state="completed",
             completed="2026-07-22",
-            semantic_attestation=False,
-        ).rstrip() + attestation + "\n"
+        )
         put(root, "docs/exec-plans/completed/safe-plan.md", completed)
         put(root, "docs/exec-plans/index.md", index_with_completed())
         report = harness.validate_plan_command(
@@ -1732,6 +1761,67 @@ _None._
         ids = {item.id for item in report.findings}
         self.assertNotIn("PLAN013", ids)
         self.assertNotIn("PLAN016", ids)
+
+    def test_completed_plan_rejects_attestation_hidden_in_fenced_code(self) -> None:
+        temporary, root = self.make_root()
+        self.addCleanup(temporary.cleanup)
+        self.install_plan_lifecycle(root)
+        completed = plan_text(state="completed", completed="2026-07-22")
+        lines = completed.splitlines(keepends=True)
+        attestation = next(line for line in lines if "Semantic-Review:" in line)
+        completed = "".join(line for line in lines if line != attestation)
+        completed += f"\n  ```text\n{attestation}  ```\n"
+        put(root, "docs/exec-plans/completed/safe-plan.md", completed)
+        put(root, "docs/exec-plans/index.md", index_with_completed())
+        report = harness.validate_plan_command(
+            root, "safe-plan", "completed", False, True
+        )
+        self.assertIn("PLAN016", {item.id for item in report.findings})
+
+    def test_completed_plan_rejects_stale_attestation_after_content_change(self) -> None:
+        temporary, root = self.make_root()
+        self.addCleanup(temporary.cleanup)
+        self.install_plan_lifecycle(root)
+        completed = plan_text(state="completed", completed="2026-07-22").replace(
+            "No user-visible gap remains",
+            "A new unreviewed production-impacting gap remains",
+            1,
+        )
+        put(root, "docs/exec-plans/completed/safe-plan.md", completed)
+        put(root, "docs/exec-plans/index.md", index_with_completed())
+        report = harness.validate_plan_command(
+            root, "safe-plan", "completed", False, True
+        )
+        self.assertIn("PLAN016", {item.id for item in report.findings})
+
+    def test_completed_plan_rejects_future_semantic_review_timestamp(self) -> None:
+        temporary, root = self.make_root()
+        self.addCleanup(temporary.cleanup)
+        self.install_plan_lifecycle(root)
+        completed = refresh_semantic_review_digest(
+            plan_text(state="completed", completed="2026-07-22").replace(
+                "reviewed-at=2026-07-22 10:30Z",
+                "reviewed-at=2999-01-01 00:00Z",
+                1,
+            )
+        )
+        put(root, "docs/exec-plans/completed/safe-plan.md", completed)
+        put(root, "docs/exec-plans/index.md", index_with_completed())
+        report = harness.validate_plan_command(
+            root, "safe-plan", "completed", False, True
+        )
+        self.assertIn("PLAN016", {item.id for item in report.findings})
+
+    def test_semantic_review_digest_removes_only_the_live_attestation_line(self) -> None:
+        completed = plan_text(state="completed", completed="2026-07-22")
+        attestations = harness.live_semantic_review_attestations(completed)
+        self.assertEqual(1, len(attestations))
+        attestation = attestations[0]
+        expected = hashlib.sha256(
+            (completed[: attestation.start] + completed[attestation.end :]).encode()
+        ).hexdigest()
+        self.assertEqual(expected, harness.semantic_review_content_sha256(completed))
+        self.assertTrue(harness.semantic_review_attestation_is_valid(completed))
 
     def test_cli_audit_json_is_nonblocking_even_with_errors(self) -> None:
         temporary, root = self.make_root()
@@ -3050,10 +3140,10 @@ _None._
         self.assertEqual("verified", status)
         self.assertIn("p95", detail)
 
-    def test_valid_production_certification_is_commit_bound_and_read_only(self) -> None:
+    def test_legacy_v1_production_certification_is_rejected_and_read_only(self) -> None:
         temporary, root = self.make_root()
         self.addCleanup(temporary.cleanup)
-        install_valid_certification(root)
+        install_legacy_v1_production_claim_fixture(root)
         before = tree_fingerprint(root)
         report = harness.Report(command="certify", root=str(root))
         harness.validate_certification(
@@ -3064,177 +3154,116 @@ _None._
             CERT_COMMIT,
             now=CERT_NOW,
         )
-        self.assertEqual([], [item for item in report.findings if item.severity == "error"])
+        self.assertIn("CERT002", {item.id for item in report.findings})
+        self.assertNotIn("CERT000", {item.id for item in report.findings})
         self.assertEqual(before, tree_fingerprint(root))
 
     def test_certification_rejects_commit_expiry_and_coverage_drift(self) -> None:
         cases = ("commit", "expiry", "coverage")
         for case in cases:
             with self.subTest(case=case):
-                temporary, root = self.make_root()
-                self.addCleanup(temporary.cleanup)
-                manifest = install_valid_certification(root)
-                expected_commit = CERT_COMMIT
-                if case == "commit":
-                    expected_commit = "f" * 40
-                elif case == "expiry":
-                    manifest["expires_at"] = "2026-07-23T11:30:00Z"
-                    put(root, harness.CERTIFICATION_REL, json.dumps(manifest))
-                else:
-                    coverage = root / "docs/agent-harness/coverage-matrix.md"
-                    coverage.write_text(
-                        coverage.read_text(encoding="utf-8") + "\nDrift.\n",
-                        encoding="utf-8",
+                fixture = CertificationFixture(
+                    manifest_mutation=(
+                        "expired"
+                        if case == "expiry"
+                        else "coverage-digest" if case == "coverage" else None
                     )
-                report = harness.Report(command="certify", root=str(root))
-                harness.validate_certification(
-                    report,
-                    root,
-                    dict(harness.DEFAULT_AUTHORITIES),
-                    "adaptive",
-                    expected_commit,
-                    now=CERT_NOW,
                 )
-                ids = {item.id for item in report.findings if item.severity == "error"}
-                expected = {"commit": "CERT004", "expiry": "CERT005", "coverage": "CERT007"}
+                self.addCleanup(fixture.close)
+                if case == "commit":
+                    result = fixture.run_cli(commit="f" * 40)
+                else:
+                    result = fixture.run_cli()
+                self.assertNotEqual(0, result.returncode)
+                payload = json.loads(result.stdout)
+                ids = {item["id"] for item in payload["findings"]}
+                expected = {
+                    "commit": "CERT014",
+                    "expiry": "CERT005",
+                    "coverage": "CERT007",
+                }
                 self.assertIn(expected[case], ids)
+                self.assertNotIn("CERT000", ids)
 
     def test_certification_rejects_forged_stale_and_image_only_evidence(self) -> None:
         cases = ("capability", "stale", "postissue", "duplicate", "image")
+        mutations = {
+            "capability": "wrong-capability",
+            "stale": "stale",
+            "postissue": "postissue",
+            "duplicate": "duplicate-json",
+        }
         for case in cases:
             with self.subTest(case=case):
-                temporary, root = self.make_root()
-                self.addCleanup(temporary.cleanup)
-                manifest = install_valid_certification(root)
-                evidence_path = root / "docs/agent-harness/evidence/capability-00.json"
-                if case in {"capability", "stale", "postissue", "duplicate"}:
-                    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-                    if case == "capability":
-                        evidence["capabilities"] = ["Different capability"]
-                    elif case == "stale":
-                        evidence["observed_at"] = "2026-07-01T00:00:00Z"
-                    elif case == "postissue":
-                        evidence["observed_at"] = "2026-07-23T11:45:00Z"
-                    if case == "duplicate":
-                        serialized = json.dumps(evidence).replace(
-                            '"result": "passed"',
-                            '"result": "failed", "result": "passed"',
-                        )
-                        evidence_path.write_text(serialized, encoding="utf-8")
-                    else:
-                        evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
-                else:
-                    coverage_path = root / "docs/agent-harness/coverage-matrix.md"
-                    coverage = coverage_path.read_text(encoding="utf-8").replace(
-                        "[fresh evidence](evidence/capability-00.json)",
-                        "![fresh evidence](evidence/capability-00.json)",
-                        1,
-                    )
-                    coverage_path.write_text(coverage, encoding="utf-8")
-                    manifest["coverage_sha256"] = hashlib.sha256(coverage.encode()).hexdigest()
-                    put(root, harness.CERTIFICATION_REL, json.dumps(manifest))
-                report = harness.Report(command="certify", root=str(root))
-                harness.validate_certification(
-                    report,
-                    root,
-                    dict(harness.DEFAULT_AUTHORITIES),
-                    "adaptive",
-                    CERT_COMMIT,
-                    now=CERT_NOW,
+                fixture = CertificationFixture(
+                    mutate_first_evidence=mutations.get(case),
+                    first_link_as_image=case == "image",
                 )
-                self.assertIn("CERT009", {item.id for item in report.findings})
+                self.addCleanup(fixture.close)
+                result = fixture.run_cli()
+                self.assertNotEqual(0, result.returncode)
+                ids = {
+                    item["id"]
+                    for item in json.loads(result.stdout)["findings"]
+                }
+                self.assertIn("CERT009", ids)
+                self.assertNotIn("CERT000", ids)
 
     def test_certification_accepts_evidenced_na_but_not_production_na(self) -> None:
-        temporary, root = self.make_root()
-        self.addCleanup(temporary.cleanup)
-        manifest = install_valid_certification(root)
-        coverage_path = root / "docs/agent-harness/coverage-matrix.md"
-        coverage = coverage_path.read_text(encoding="utf-8")
-        coverage = coverage.replace(
-            "verified — [fresh evidence](evidence/capability-00.json)",
-            "N/A — [applicability evidence](evidence/capability-00.json)",
-            1,
+        applicable = CertificationFixture(mutate_first_evidence="n/a")
+        self.addCleanup(applicable.close)
+        accepted = applicable.run_cli()
+        self.assertNotEqual(0, accepted.returncode)
+        accepted_payload = json.loads(accepted.stdout)
+        accepted_ids = {item["id"] for item in accepted_payload["findings"]}
+        self.assertIn("CERT015", accepted_ids)
+        self.assertNotIn("CERT000", accepted_ids)
+        self.assertEqual(
+            {"CERT015"},
+            {
+                item["id"]
+                for item in accepted_payload["findings"]
+                if item["severity"] == "error" and item["id"].startswith("CERT")
+            },
         )
-        evidence_path = root / "docs/agent-harness/evidence/capability-00.json"
-        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-        evidence["result"] = "not-applicable"
-        evidence["exit_code"] = None
-        evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
-        coverage_path.write_text(coverage, encoding="utf-8")
-        manifest["coverage_sha256"] = hashlib.sha256(coverage.encode()).hexdigest()
-        put(root, harness.CERTIFICATION_REL, json.dumps(manifest))
-        report = harness.Report(command="certify", root=str(root))
-        harness.validate_certification(
-            report,
-            root,
-            dict(harness.DEFAULT_AUTHORITIES),
-            "adaptive",
-            CERT_COMMIT,
-            now=CERT_NOW,
-        )
-        self.assertEqual([], [item for item in report.findings if item.severity == "error"])
 
-        production_line = next(
-            line
-            for line in coverage.splitlines()
-            if "Release, deployment, and production actions require repository-local authority" in line
-        )
-        production_na = production_line.replace(
-            "verified — [fresh evidence]", "N/A — [applicability evidence]"
-        )
-        coverage = coverage.replace(production_line, production_na)
-        coverage_path.write_text(coverage, encoding="utf-8")
-        manifest["coverage_sha256"] = hashlib.sha256(coverage.encode()).hexdigest()
-        put(root, harness.CERTIFICATION_REL, json.dumps(manifest))
-        report = harness.Report(command="certify", root=str(root))
-        harness.validate_certification(
-            report,
-            root,
-            dict(harness.DEFAULT_AUTHORITIES),
-            "adaptive",
-            CERT_COMMIT,
-            now=CERT_NOW,
-        )
-        self.assertIn("CERT009", {item.id for item in report.findings})
+        production = CertificationFixture(production_na=True)
+        self.addCleanup(production.close)
+        rejected = production.run_cli()
+        self.assertNotEqual(0, rejected.returncode)
+        ids = {item["id"] for item in json.loads(rejected.stdout)["findings"]}
+        self.assertIn("CERT009", ids)
+        self.assertNotIn("CERT000", ids)
 
     def test_certification_requires_continuous_native_and_production_gates(self) -> None:
         cases = ("triggers", "native", "approval")
         for case in cases:
             with self.subTest(case=case):
-                temporary, root = self.make_root()
-                self.addCleanup(temporary.cleanup)
-                manifest = install_valid_certification(root)
-                if case == "triggers":
-                    maintenance = manifest["maintenance"]
-                    assert isinstance(maintenance, dict)
-                    maintenance["triggers"] = ["push"]
-                elif case == "native":
-                    gate = manifest["project_native_gate"]
-                    assert isinstance(gate, dict)
-                    gate["evidence"] = "docs/agent-harness/coverage-matrix.md"
-                else:
-                    approval_path = root / "docs/agent-harness/evidence/production-approval.json"
-                    approval = json.loads(approval_path.read_text(encoding="utf-8"))
-                    approval["environment"] = "ci"
-                    approval_path.write_text(json.dumps(approval), encoding="utf-8")
-                put(root, harness.CERTIFICATION_REL, json.dumps(manifest))
-                report = harness.Report(command="certify", root=str(root))
-                harness.validate_certification(
-                    report,
-                    root,
-                    dict(harness.DEFAULT_AUTHORITIES),
-                    "adaptive",
-                    CERT_COMMIT,
-                    now=CERT_NOW,
+                fixture = CertificationFixture(
+                    manifest_mutation=(
+                        case if case == "triggers" else "native-evidence"
+                        if case == "native"
+                        else None
+                    ),
+                    named_evidence_mutation=(
+                        "approval-environment" if case == "approval" else None
+                    ),
                 )
-                ids = {item.id for item in report.findings}
+                self.addCleanup(fixture.close)
+                result = fixture.run_cli()
+                self.assertNotEqual(0, result.returncode)
+                ids = {
+                    item["id"]
+                    for item in json.loads(result.stdout)["findings"]
+                }
                 expected = {"triggers": "CERT006", "native": "CERT008", "approval": "CERT008"}
                 self.assertIn(expected[case], ids)
+                self.assertNotIn("CERT000", ids)
 
     def test_cli_certify_is_structured_and_fails_closed_on_audit_warnings(self) -> None:
         temporary, root = self.make_root()
         self.addCleanup(temporary.cleanup)
-        install_valid_certification(root)
+        install_legacy_v1_production_claim_fixture(root)
         result = self.run_cli(
             "certify",
             "--root",
@@ -3262,6 +3291,21 @@ _None._
             if ":" in line
         }
         self.assertEqual({"name", "description"}, keys)
+        openai_metadata = (
+            harness.SKILL_ROOT / "agents" / "openai.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertRegex(
+            openai_metadata,
+            r"(?m)^policy:\n  allow_implicit_invocation: false$",
+        )
+        self.assertIn(
+            "Installing this package only makes the skill available to Codex.",
+            skill_text,
+        )
+        self.assertIn(
+            "explicitly invokes `$apply-harness-engineering`",
+            skill_text,
+        )
         forbidden = {"__pycache__", ".DS_Store"}
         for path in harness.SKILL_ROOT.rglob("*"):
             rel = path.relative_to(harness.SKILL_ROOT)

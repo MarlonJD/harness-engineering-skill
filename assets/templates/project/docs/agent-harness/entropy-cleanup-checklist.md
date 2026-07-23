@@ -2,6 +2,8 @@
 
 Run this sweep at a cadence justified by repository change rate. Keep the process read-only until a finding is verified; use an ExecPlan for broad remediation.
 
+The cadence must be implemented by an explicitly authorized repository-native runner. Installing the external skill does not schedule this sweep or grant repair, pull-request, merge, release, or production authority.
+
 ## Documentation and navigation
 
 - [ ] Check local Markdown links and indexes.
@@ -22,9 +24,9 @@ Run this sweep at a cadence justified by repository change rate. Keep the proces
 - [ ] Check flaky tests, stale fixtures, inaccessible logs, and nondeterministic setup/reset paths.
 - [ ] Confirm UI, API, migration, or operational evidence still matches the verification matrix.
 - [ ] Check isolation and cleanup for concurrent or long-running agent work.
-- [ ] Confirm every coverage status links to fresh evidence for the current commit.
-- [ ] Confirm the project-native certificate gate runs on pull requests, pushes, and schedule; exercise one invalidate-and-recover path.
-- [ ] Expire any production-ready claim whose commit, coverage digest, evidence, approval, rollback, or freshness window no longer matches.
+- [ ] Confirm every completed coverage status links to one fresh HMAC-consistent v2 candidate record for the source commit; do not describe the HMAC as external authentication.
+- [ ] Confirm an explicitly authorized project-native candidate gate runs on its declared pull-request, push, and schedule triggers; exercise one invalidate-and-recover path and preserve nonzero `CERT015`.
+- [ ] Expire any candidate whose source/attestation commits, repository or target identity, coverage digest, record signature, declared approval or rollback input, or freshness window no longer matches. Reject any production-ready claim while the external provider verifier is unavailable.
 
 ## Triage
 

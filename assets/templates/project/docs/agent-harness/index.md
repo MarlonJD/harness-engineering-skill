@@ -2,6 +2,8 @@
 
 This directory is the progressive-disclosure entry point for capabilities that help coding agents work reliably in this repository.
 
+Its presence records an explicit repository adoption; installing the external skill neither creates this directory nor runs any workflow. The repository's own checked-in gates and schedules, once deliberately implemented, own continuous invalidation.
+
 Root [`AGENTS.md`](../../AGENTS.md) is the canonical instruction map. If root `AGENTS.override.md` exists, Codex loads that higher-precedence entry point instead, and it must preserve routes to the same authorities before the effective `project_doc_max_bytes` cutoff. Codex defaults that budget to 32 KiB and combines project instructions from root toward the working directory. `config.json` declares downstream authorities but does not make an arbitrary instruction filename auto-loadable or change Codex configuration.
 
 ## Capability map
@@ -16,7 +18,7 @@ Root [`AGENTS.md`](../../AGENTS.md) is the canonical instruction map. If root `A
 | Change-to-verification mapping | [`verification-matrix.md`](verification-matrix.md) |
 | Recurring drift cleanup | [`entropy-cleanup-checklist.md`](entropy-cleanup-checklist.md) |
 | Source-principle coverage | [`coverage-matrix.md`](coverage-matrix.md) |
-| Production certification and continuous invalidation | [`certification.md`](certification.md) and [`certification.json`](certification.json) |
+| Candidate integrity, continuous invalidation, and the `CERT015` external-verifier blocker | [`certification.md`](certification.md) and [`certification.json`](certification.json) |
 | Long-running work | [`../exec-plans/index.md`](../exec-plans/index.md) |
 
 ## Route by task
@@ -32,7 +34,7 @@ Root [`AGENTS.md`](../../AGENTS.md) is the canonical instruction map. If root `A
 | Sweep drift and technical debt | [`entropy-cleanup-checklist.md`](entropy-cleanup-checklist.md) | [`../exec-plans/tech-debt-tracker.md`](../exec-plans/tech-debt-tracker.md) or a new active plan |
 | Prepare security, reliability, release, or external work | [`output-contract.md`](output-contract.md) | [`../SECURITY.md`](../SECURITY.md), [`../RELIABILITY.md`](../RELIABILITY.md), and applicable approval rules |
 | Audit whether the harness is complete | [`coverage-matrix.md`](coverage-matrix.md) | Verify every applicable row with a repository artifact and observed evidence |
-| Converge and certify production readiness | [`certification.md`](certification.md) | Resolve every coverage row, run the project-native gate, and validate [`certification.json`](certification.json) for the trusted commit |
+| Converge a local candidate and assess the production blocker | [`certification.md`](certification.md) | Resolve every coverage row with HMAC-consistent v2 candidate records, run the project-native candidate gate, validate the source/direct-child attestation pair, and preserve nonzero `CERT015` until an independently provisioned provider verifier exists |
 
 ## Operating loop
 
@@ -50,4 +52,4 @@ Follow this loop: discover intent, select or create a plan, implement an observa
 | Entropy control | <!-- TODO(harness) --> | <!-- evidence --> | <!-- improvement --> |
 | Safe autonomy | <!-- TODO(harness) --> | <!-- evidence --> | <!-- improvement --> |
 
-Do not infer maturity from documents alone. Require a repeatable command or observable result for repeatable and higher states.
+Do not infer maturity from documents, templates, or skill installation alone. Require a repeatable command or observable result for repeatable and higher states.

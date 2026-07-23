@@ -2,6 +2,8 @@
 
 Use this file as a map. Keep detailed explanations in the linked canonical documents.
 
+This file exists only after an explicitly authorized repository adoption. Installing the external Harness Engineering skill does not create, update, or enforce this repository contract.
+
 ## Start here
 
 - Repository documentation map: [`docs/index.md`](docs/index.md)
@@ -22,6 +24,7 @@ Use this file as a map. Keep detailed explanations in the linked canonical docum
 - Keep active ExecPlans current while implementing; record decisions and observed evidence.
 - Validate behavior with the narrowest reliable command first, then run broader required checks.
 - Do not perform external writes, releases, deployments, destructive operations, or branch changes without the authority required by repository and user instructions.
+- Treat missing project commands, secrets, production access, or human approval as blockers. Never convert a template, placeholder, or local assertion into evidence that an external action occurred.
 
 ## Commands
 

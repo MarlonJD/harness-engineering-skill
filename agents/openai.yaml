@@ -1,4 +1,6 @@
 interface:
   display_name: "Apply Harness Engineering"
-  short_description: "Converge and certify a production-ready harness"
-  default_prompt: "Use $apply-harness-engineering to converge this repository to a continuously maintained, commit-bound production-ready harness and fail closed on missing evidence or authority."
+  short_description: "Audit and adopt a repository harness safely"
+  default_prompt: "Use $apply-harness-engineering to audit this named repository, implement the mapped harness within current authority, and report a blocker instead of claiming production readiness when any required command or external evidence is unavailable."
+policy:
+  allow_implicit_invocation: false

@@ -4,36 +4,73 @@
 from __future__ import annotations
 
 import argparse
+from array import array
 from collections import Counter, deque
 import hashlib
+import hmac
 import html
 from html.entities import html5 as HTML5_ENTITIES
 from html.parser import HTMLParser
 import json
 import os
 import re
+import signal
+import shutil
 import stat
+import subprocess
 import sys
-import tomllib
+import threading
+import time
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Sequence
 from urllib.parse import unquote
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 and earlier
+    tomllib = None  # type: ignore[assignment]
+
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_ROOT = SKILL_ROOT / "assets" / "templates" / "project"
 MAX_TEXT_BYTES = 2 * 1024 * 1024
+MAX_STRUCTURED_NESTING = 64
 MAX_INDEX_ROWS = 25_000
 MAX_COVERAGE_ROWS = 5_000
 MAX_MARKDOWN_LINK_NESTING = 64
+MIN_MARKDOWN_PARSE_WORK = 64 * 1024
+MAX_MARKDOWN_PARSE_WORK = 8 * 1024 * 1024
+MAX_MARKDOWN_LINK_RESULTS = 1_024
+MAX_REPORT_FINDINGS = 2_048
+MAX_REPORT_ACTIONS = 512
+MAX_REPORT_TEXT_CHARS = 512 * 1024
+MAX_REPOSITORY_WALK_ENTRIES = 25_000
+MAX_MARKDOWN_FILES = 4_096
+MAX_MARKDOWN_PATH_BYTES = 2 * 1024 * 1024
+MAX_MARKDOWN_AGGREGATE_BYTES = 64 * 1024 * 1024
+MAX_OWNER_CHARS = 256
+MAX_REVIEW_EVIDENCE_CHARS = 4096
+MAX_ROUTED_DOCUMENT_BYTES = 8 * 1024 * 1024
 MARKDOWN_LINK_NESTING_SENTINEL = "\ue103HARNESS_LINK_NESTING_LIMIT\ue104"
+MARKDOWN_PARSE_BUDGET_SENTINEL = "\ue105HARNESS_PARSE_WORK_LIMIT\ue106"
+MARKDOWN_RESULT_BUDGET_SENTINEL = "\ue107HARNESS_LINK_RESULT_LIMIT\ue108"
+MARKDOWN_PARSE_BUDGET_EXCEEDED = -2
 CONFIG_REL = "docs/agent-harness/config.json"
 CERTIFICATION_REL = "docs/agent-harness/certification.json"
 CODEX_PROJECT_CONFIG_REL = ".codex/config.toml"
 DEFAULT_PROJECT_DOC_MAX_BYTES = 32 * 1024
 MAX_CERTIFICATION_AGE_HOURS = 168
+MIN_ATTESTATION_KEY_BYTES = 32
+MAX_ATTESTATION_KEY_BYTES = 4096
+MAX_GIT_COMMAND_OUTPUT_BYTES = 2 * 1024 * 1024
+GIT_COMMAND_TIMEOUT_SECONDS = 10
+GIT_TERMINATION_GRACE_SECONDS = 0.25
+MAX_CERTIFICATION_COMMIT_OBJECT_BYTES = 1024 * 1024
+MAX_CERTIFICATION_TRACKED_BYTES = 256 * 1024 * 1024
+EVIDENCE_HMAC_CONTEXT = b"harness-engineering-evidence-v2\x00"
 PROJECT_GATE_CAPABILITY = "project-native-harness-gate"
 MAINTENANCE_CAPABILITY = "continuous-harness-maintenance"
 PRODUCTION_APPROVAL_CAPABILITY = "production-authority-approval"
@@ -193,6 +230,32 @@ class ArgumentParseFailure(RuntimeError):
     """Raised instead of printing an unstructured argparse error."""
 
 
+class MarkdownParseBudget:
+    """Shared deterministic work/result budget for recursive Markdown parsing."""
+
+    def __init__(self, source_length: int) -> None:
+        scaled = max(0, source_length) * 16
+        self.work_remaining = max(
+            MIN_MARKDOWN_PARSE_WORK,
+            min(MAX_MARKDOWN_PARSE_WORK, scaled),
+        )
+        self.results_remaining = MAX_MARKDOWN_LINK_RESULTS
+
+    def consume_work(self, amount: int) -> bool:
+        amount = max(1, amount)
+        if amount > self.work_remaining:
+            self.work_remaining = 0
+            return False
+        self.work_remaining -= amount
+        return True
+
+    def consume_result(self) -> bool:
+        if self.results_remaining <= 0:
+            return False
+        self.results_remaining -= 1
+        return True
+
+
 class HarnessArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise ArgumentParseFailure(message)
@@ -207,12 +270,70 @@ class Finding:
     remediation: str
 
 
+@dataclass(frozen=True)
+class NormalizedMarkdown:
+    """Markdown text plus parser-only container boundaries."""
+
+    text: str
+    boundary_lines: frozenset[int] = frozenset()
+
+
 @dataclass
 class Report:
     command: str
     root: str
     findings: list[Finding] = field(default_factory=list)
     actions: list[dict[str, str]] = field(default_factory=list)
+    _omitted_findings: int = field(default=0, init=False, repr=False)
+    _omitted_actions: int = field(default=0, init=False, repr=False)
+    _stored_text_chars: int = field(default=0, init=False, repr=False)
+    _resource_limit_reached: bool = field(default=False, init=False, repr=False)
+    _resource_limit_finding_added: bool = field(default=False, init=False, repr=False)
+
+    @staticmethod
+    def _finding_text_chars(finding: Finding) -> int:
+        return sum(
+            len(value)
+            for value in (
+                finding.id,
+                finding.severity,
+                finding.path,
+                finding.message,
+                finding.remediation,
+            )
+        )
+
+    @staticmethod
+    def _action_text_chars(action: dict[str, str]) -> int:
+        return sum(len(str(key)) + len(str(value)) for key, value in action.items())
+
+    def _ensure_resource_limit_finding(self) -> None:
+        if self._resource_limit_finding_added:
+            return
+        sentinel = Finding(
+            "REPORT001",
+            "error",
+            ".",
+            "Report resource limits were exceeded; additional results were omitted.",
+            "Reduce the repository input size or split the audit, then rerun every gate.",
+        )
+        if len(self.findings) >= MAX_REPORT_FINDINGS:
+            removed = self.findings.pop()
+            self._stored_text_chars -= self._finding_text_chars(removed)
+            self._omitted_findings += 1
+        self.findings.append(sentinel)
+        self._stored_text_chars += self._finding_text_chars(sentinel)
+        self._resource_limit_finding_added = True
+
+    def _omit_finding(self) -> None:
+        self._omitted_findings += 1
+        self._resource_limit_reached = True
+        self._ensure_resource_limit_finding()
+
+    def _omit_action(self) -> None:
+        self._omitted_actions += 1
+        self._resource_limit_reached = True
+        self._ensure_resource_limit_finding()
 
     def add(
         self,
@@ -222,9 +343,41 @@ class Report:
         message: str,
         remediation: str,
     ) -> None:
-        self.findings.append(
-            Finding(finding_id, severity, path, message, remediation)
+        finding = Finding(
+            str(finding_id),
+            str(severity),
+            str(path),
+            str(message),
+            str(remediation),
         )
+        cost = self._finding_text_chars(finding)
+        if (
+            self._resource_limit_reached
+            or len(self.findings) >= MAX_REPORT_FINDINGS - 1
+            or self._stored_text_chars + cost > MAX_REPORT_TEXT_CHARS
+        ):
+            self._omit_finding()
+            return
+        self.findings.append(finding)
+        self._stored_text_chars += cost
+
+    def add_action(self, action: dict[str, str]) -> None:
+        normalized = {str(key): str(value) for key, value in action.items()}
+        cost = self._action_text_chars(normalized)
+        if (
+            self._resource_limit_reached
+            or len(self.actions) >= MAX_REPORT_ACTIONS
+            or self._stored_text_chars + cost > MAX_REPORT_TEXT_CHARS
+        ):
+            self._omit_action()
+            return
+        self.actions.append(normalized)
+        self._stored_text_chars += cost
+
+    def mark_incomplete(self) -> None:
+        """Record that an upstream bounded scan intentionally omitted results."""
+        self._omitted_findings += 1
+        self._ensure_resource_limit_finding()
 
     def normalized(self) -> "Report":
         unique: list[Finding] = []
@@ -248,6 +401,10 @@ class Report:
         self.actions.sort(key=lambda item: (item.get("path", ""), item.get("action", "")))
         return self
 
+    @property
+    def truncated(self) -> bool:
+        return self._omitted_findings > 0 or self._omitted_actions > 0
+
     def summary(self) -> dict[str, int]:
         return {
             "errors": sum(item.severity == "error" for item in self.findings),
@@ -263,6 +420,11 @@ class Report:
             "summary": self.summary(),
             "findings": [asdict(item) for item in self.findings],
             "actions": self.actions,
+            "truncated": self.truncated,
+            "omitted": {
+                "findings": self._omitted_findings,
+                "actions": self._omitted_actions,
+            },
         }
 
 
@@ -278,12 +440,19 @@ def files_for_profile(profile: str) -> tuple[str, ...]:
 
 def scaffold_comment_fingerprints(text: str) -> set[str]:
     fingerprints: set[str] = set()
-    for match in re.finditer(r"<!--(.*?)-->", text, flags=re.DOTALL):
-        body = re.sub(r"\s+", " ", match.group(1).strip()).casefold()
+    cursor = 0
+    while cursor < len(text):
+        start = text.find("<!--", cursor)
+        if start < 0:
+            break
+        close = text.find("-->", start + 4)
+        if close < 0:
+            break
+        body = re.sub(r"\s+", " ", text[start + 4 : close].strip()).casefold()
         body = re.sub(r"^todo\(harness\):?\s*", "", body)
-        if not body or body.startswith(("harness:plans:", "harness-plan:v1")):
-            continue
-        fingerprints.add(body)
+        if body and not body.startswith(("harness:plans:", "harness-plan:v1")):
+            fingerprints.add(body)
+        cursor = close + 3
     return fingerprints
 
 
@@ -313,11 +482,12 @@ def configured_authority_keys(root: Path) -> set[str]:
     config_path = safe_target(root, CONFIG_REL)
     if not config_path.is_file():
         return set()
-    try:
-        payload = json.loads(read_text_safe(root, config_path))
-    except (json.JSONDecodeError, OSError, SafeRefusal):
+    payload, issue = strict_json_object(root, config_path)
+    if issue is not None or payload is None:
         return set()
-    configured = payload.get("authorities") if isinstance(payload, dict) else None
+    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
+        return set()
+    configured = payload.get("authorities")
     return set(configured) if isinstance(configured, dict) else set()
 
 
@@ -438,6 +608,27 @@ def read_bytes_safe(root: Path, path: Path) -> bytes:
             total += len(chunk)
             if total > MAX_TEXT_BYTES:
                 raise SafeRefusal(f"Managed text file exceeds {MAX_TEXT_BYTES} bytes: {path}")
+        file_stat_after = os.fstat(file_fd)
+        stable_before = (
+            file_stat.st_dev,
+            file_stat.st_ino,
+            file_stat.st_mode,
+            file_stat.st_nlink,
+            file_stat.st_size,
+            file_stat.st_mtime_ns,
+            file_stat.st_ctime_ns,
+        )
+        stable_after = (
+            file_stat_after.st_dev,
+            file_stat_after.st_ino,
+            file_stat_after.st_mode,
+            file_stat_after.st_nlink,
+            file_stat_after.st_size,
+            file_stat_after.st_mtime_ns,
+            file_stat_after.st_ctime_ns,
+        )
+        if stable_after != stable_before or total != file_stat.st_size:
+            raise SafeRefusal(f"Managed text file changed while it was being read: {path}")
         return b"".join(chunks)
     finally:
         if file_fd is not None:
@@ -452,6 +643,125 @@ def read_text_safe(root: Path, path: Path) -> str:
         return data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise SafeRefusal(f"Managed file is not valid UTF-8: {path}") from exc
+
+
+def structured_nesting_exceeds(
+    text: str,
+    *,
+    maximum: int = MAX_STRUCTURED_NESTING,
+    toml_mode: bool = False,
+) -> bool:
+    """Bound JSON/TOML container nesting before recursive library parsing."""
+    depth = 0
+    quote: str | None = None
+    triple = False
+    escaped = False
+    comment = False
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if comment:
+            if character in "\r\n":
+                comment = False
+            index += 1
+            continue
+        if quote is not None:
+            if triple and not escaped and text.startswith(quote * 3, index):
+                quote = None
+                triple = False
+                escaped = False
+                index += 3
+                continue
+            if not triple and character == quote and not escaped:
+                quote = None
+                index += 1
+                continue
+            if quote == '"' and character == "\\" and not escaped:
+                escaped = True
+            else:
+                escaped = False
+            index += 1
+            continue
+        if toml_mode and character == "#":
+            comment = True
+            index += 1
+            continue
+        if character in {'"', "'"}:
+            triple = toml_mode and text.startswith(character * 3, index)
+            quote = character
+            index += 3 if triple else 1
+            continue
+        if character in "[{":
+            depth += 1
+            if depth > maximum:
+                return True
+        elif character in "]}":
+            depth = max(0, depth - 1)
+        index += 1
+    return False
+
+
+def strict_json_value(text: str) -> object:
+    """Decode bounded JSON and reject duplicate object members at every level."""
+    if structured_nesting_exceeds(text):
+        raise ValueError(
+            f"JSON container nesting exceeds the {MAX_STRUCTURED_NESTING}-level limit"
+        )
+
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key {key!r}")
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(text, object_pairs_hook=unique_object)
+    except RecursionError as exc:
+        raise ValueError("JSON nesting exhausted the parser recursion budget") from exc
+
+
+def strict_json_object(
+    root: Path,
+    path: Path,
+) -> tuple[dict[str, object] | None, str | None]:
+    try:
+        payload = strict_json_value(read_text_safe(root, path))
+    except (ValueError, OSError, SafeRefusal) as exc:
+        return None, f"could not be read as safe JSON: {exc}"
+    if not isinstance(payload, dict):
+        return None, "must be a JSON object"
+    return payload, None
+
+
+def project_toml_object(
+    root: Path,
+    path: Path,
+) -> tuple[dict[str, object] | None, str | None]:
+    """Parse project TOML without allowing recursion to escape the report boundary."""
+    try:
+        text = read_text_safe(root, path)
+    except (OSError, SafeRefusal) as exc:
+        return None, str(exc)
+    if structured_nesting_exceeds(text, toml_mode=True):
+        return (
+            None,
+            f"TOML container nesting exceeds the {MAX_STRUCTURED_NESTING}-level limit",
+        )
+    if tomllib is None:
+        return (
+            None,
+            "TOML project configuration requires Python 3.11+ or an environment "
+            "that provides tomllib",
+        )
+    try:
+        payload = tomllib.loads(text)
+    except (ValueError, RecursionError) as exc:
+        return None, str(exc)
+    if not isinstance(payload, dict):
+        return None, "top-level TOML value must be a table"
+    return payload, None
 
 
 def is_markdown_blank_line(value: str) -> bool:
@@ -515,14 +825,13 @@ def project_instruction_fallbacks(root: Path, report: Report) -> tuple[str, ...]
             "Replace it with a regular repository-local UTF-8 TOML file.",
         )
         return ()
-    try:
-        payload = tomllib.loads(read_text_safe(root, config_path))
-    except (OSError, SafeRefusal, tomllib.TOMLDecodeError) as exc:
+    payload, issue = project_toml_object(root, config_path)
+    if issue is not None or payload is None:
         report.add(
             "CODEXCFG001",
             "error",
             CODEX_PROJECT_CONFIG_REL,
-            f"Codex project config could not be read safely: {exc}",
+            f"Codex project config could not be read safely: {issue}.",
             "Repair the UTF-8 TOML file before relying on project instruction settings.",
         )
         return ()
@@ -600,14 +909,13 @@ def project_instruction_budget(root: Path, report: Report) -> int:
             "Replace it with a regular UTF-8 TOML file.",
         )
         return budget
-    try:
-        payload = tomllib.loads(read_text_safe(root, config_path))
-    except (OSError, SafeRefusal, tomllib.TOMLDecodeError) as exc:
+    payload, issue = project_toml_object(root, config_path)
+    if issue is not None or payload is None:
         report.add(
             "CODEXCFG001",
             "error",
             CODEX_PROJECT_CONFIG_REL,
-            f"Codex project config could not be read safely: {exc}",
+            f"Codex project config could not be read safely: {issue}.",
             "Repair the UTF-8 TOML file before relying on project instruction settings.",
         )
         return budget
@@ -677,18 +985,20 @@ def load_authorities(root: Path, report: Report) -> dict[str, str]:
             "Replace it with a UTF-8 JSON file or remove the mapping.",
         )
         return authorities
-    try:
-        payload = json.loads(read_text_safe(root, config_path))
-    except (json.JSONDecodeError, OSError, SafeRefusal) as exc:
+    payload, issue = strict_json_object(root, config_path)
+    if issue is not None or payload is None:
         report.add(
             "CONFIG001",
             "error",
             CONFIG_REL,
-            f"Harness config could not be parsed: {exc}",
+            f"Harness config could not be parsed: {issue}.",
             "Use an object with schema_version 1 and string authority paths.",
         )
         return authorities
-    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+    if (
+        type(payload.get("schema_version")) is not int
+        or payload.get("schema_version") != 1
+    ):
         report.add(
             "CONFIG001",
             "error",
@@ -886,7 +1196,9 @@ class _VisibleHTMLTextParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self.stack: list[tuple[str, bool]] = []
+        self.tag_positions: dict[str, list[int]] = {}
         self.hidden_depth = 0
+        self.work_units = 0
 
     @staticmethod
     def _is_hidden(tag: str, attrs: list[tuple[str, str | None]]) -> bool:
@@ -906,9 +1218,12 @@ class _VisibleHTMLTextParser(HTMLParser):
         normalized = tag.casefold()
         hidden = self.hidden_depth > 0 or self._is_hidden(normalized, attrs)
         if normalized not in self._VOID_TAGS:
+            position = len(self.stack)
             self.stack.append((normalized, hidden))
+            self.tag_positions.setdefault(normalized, []).append(position)
             if hidden:
                 self.hidden_depth += 1
+            self.work_units += 1
 
     def handle_startendtag(
         self, tag: str, attrs: list[tuple[str, str | None]]
@@ -917,20 +1232,20 @@ class _VisibleHTMLTextParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         normalized = tag.casefold()
-        matching = next(
-            (
-                index
-                for index in range(len(self.stack) - 1, -1, -1)
-                if self.stack[index][0] == normalized
-            ),
-            None,
-        )
-        if matching is None:
+        self.work_units += 1
+        positions = self.tag_positions.get(normalized)
+        if not positions:
             return
-        for _, hidden in self.stack[matching:]:
+        matching = positions[-1]
+        while len(self.stack) > matching:
+            popped_tag, hidden = self.stack.pop()
+            popped_positions = self.tag_positions[popped_tag]
+            popped_positions.pop()
+            if not popped_positions:
+                del self.tag_positions[popped_tag]
             if hidden:
                 self.hidden_depth = max(0, self.hidden_depth - 1)
-        del self.stack[matching:]
+            self.work_units += 1
 
     def handle_data(self, data: str) -> None:
         if self.hidden_depth == 0:
@@ -946,8 +1261,10 @@ def visible_html_text(value: str) -> str:
 
 def strip_markdown_link_markup(value: str) -> str:
     """Keep rendered labels/alt text while discarding Markdown link destinations."""
+    budget = MarkdownParseBudget(len(value))
+
     def render_segment(text: str, depth: int) -> str:
-        if depth > 64:
+        if depth > MAX_MARKDOWN_LINK_NESTING or not budget.consume_work(len(text)):
             # Excessive nesting is not useful lifecycle evidence; fail closed.
             return "TODO(harness)"
         bracket_text = mask_inline_code_spans(text)
@@ -976,7 +1293,13 @@ def strip_markdown_link_markup(value: str) -> str:
             following = closing + 1
             end = following
             if following < len(text) and text[following] == "(":
-                link_end = closing_inline_link_parenthesis(text, following)
+                link_end = closing_inline_link_parenthesis(
+                    text,
+                    following,
+                    budget=budget,
+                )
+                if link_end == MARKDOWN_PARSE_BUDGET_EXCEEDED:
+                    return "TODO(harness)"
                 if link_end >= 0:
                     end = link_end + 1
             elif following < len(text) and text[following] == "[":
@@ -1055,34 +1378,71 @@ def mask_same_shape(text: str) -> str:
 def valid_html_comment_spans(text: str) -> list[tuple[int, int]]:
     """Return closed inline comments and unclosed block-start HTML comments."""
     spans: list[tuple[int, int]] = []
-    cursor = 0
-    while cursor < len(text):
-        start = text.find("<!--", cursor)
-        if start < 0:
+    block_start: int | None = None
+    inline_start: int | None = None
+    line_scan = 0
+    line_start = 0
+
+    def advance_line_start(position: int) -> int:
+        nonlocal line_scan, line_start
+        newline = max(
+            text.rfind("\n", line_scan, position),
+            text.rfind("\r", line_scan, position),
+        )
+        if newline >= 0:
+            line_start = newline + 1
+        line_scan = position
+        return line_start
+
+    def is_block_opening(position: int, start: int) -> bool:
+        prefix_length = position - start
+        return (
+            prefix_length <= 3
+            and text.startswith(" " * prefix_length, start)
+        )
+
+    opening = text.find("<!--")
+    closing = text.find("-->")
+    while opening >= 0 or closing >= 0:
+        if closing < 0:
+            while opening >= 0:
+                opening_line_start = advance_line_start(opening)
+                if not is_escaped(text, opening):
+                    break
+                opening = text.find("<!--", opening + 4)
+            if opening >= 0:
+                if is_block_opening(opening, opening_line_start):
+                    spans.append((opening, len(text)))
             break
-        if is_escaped(text, start):
-            cursor = start + 1
+        if opening >= 0 and opening < closing:
+            opening_line_start = advance_line_start(opening)
+            if not is_escaped(text, opening):
+                opens_block = is_block_opening(opening, opening_line_start)
+                if opens_block:
+                    if block_start is None:
+                        block_start = opening
+                else:
+                    # If several inline candidates share a closer, only the latest
+                    # can be valid: every earlier body contains the later opener's
+                    # forbidden "--" sequence.
+                    inline_start = opening
+            opening = text.find("<!--", opening + 4)
             continue
-        line_start = text.rfind("\n", 0, start) + 1
-        block_start = re.fullmatch(r" {0,3}", text[line_start:start]) is not None
-        close = text.find("-->", start + 4)
-        if close >= 0:
-            content = text[start + 4 : close]
-            valid = block_start or not (
+
+        if block_start is not None:
+            spans.append((block_start, closing + 3))
+        elif inline_start is not None:
+            content = text[inline_start + 4 : closing]
+            valid = not (
                 content.startswith((">", "->"))
                 or content.endswith("-")
                 or "--" in content
             )
             if valid:
-                spans.append((start, close + 3))
-                cursor = close + 3
-                continue
-            cursor = start + 4
-            continue
-        if block_start:
-            spans.append((start, len(text)))
-            break
-        cursor = start + 4
+                spans.append((inline_start, closing + 3))
+        block_start = None
+        inline_start = None
+        closing = text.find("-->", closing + 3)
     return spans
 
 
@@ -1111,7 +1471,6 @@ HTML_BLOCK_TAGS = {
     "thead", "title", "tr", "track", "ul",
 }
 
-CONTAINER_BOUNDARY = "\ue100HARNESS_CONTAINER_BOUNDARY\ue101"
 INLINE_CODE_BOUNDARY = "\ue102"
 
 INLINE_HTML_TAG_RE = re.compile(
@@ -1129,10 +1488,55 @@ INLINE_HTML_TAG_RE = re.compile(
     re.VERBOSE | re.DOTALL,
 )
 
+INLINE_CODE_BLOCK_BOUNDARY_RE = re.compile(
+    r"\r?\n(?:"
+    r"[ \t]*\r?\n|"
+    r" {0,3}(?:#{1,6}(?:[ \t]|$)|>[ \t]?|"
+    r"(?:[-+*]|1[.)])[ \t]+|`{3,}|~{3,}|"
+    r"(?:={3,}|-{3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})[ \t]*$|"
+    r"<!--|<\?|<!\[CDATA\[|<![A-Za-z]|"
+    r"</?(?:script|pre|style|textarea)(?:\s|>|$)))",
+    re.MULTILINE | re.IGNORECASE,
+)
 
-def mask_inline_code_spans(text: str) -> str:
-    """Mask CommonMark backtick code spans, including multiline spans."""
-    output = list(text)
+
+def inline_code_block_boundaries(text: str) -> tuple[array, array]:
+    """Index paragraph/block boundaries once for inline-code span matching."""
+    starts = array("I")
+    ends = array("I")
+    for match in INLINE_CODE_BLOCK_BOUNDARY_RE.finditer(text):
+        start, end = match.span()
+        starts.append(start)
+        ends.append(end)
+    return starts, ends
+
+
+def interval_has_inline_code_boundary(
+    boundaries: tuple[array, array],
+    start: int,
+    end: int,
+) -> bool:
+    starts, ends = boundaries
+    low = 0
+    high = len(starts)
+    while low < high:
+        middle = (low + high) // 2
+        if starts[middle] < start:
+            low = middle + 1
+        else:
+            high = middle
+    return (
+        low < len(starts)
+        and starts[low] < end
+        and ends[low] <= end
+    )
+
+
+def inline_code_span_ranges(text: str) -> list[tuple[int, int, int, int]]:
+    """Return non-overlapping CommonMark code-span delimiter ranges."""
+    run_starts = array("I")
+    run_ends = array("I")
+    run_widths = array("I")
     cursor = 0
     while cursor < len(text):
         opening = text.find("`", cursor)
@@ -1142,40 +1546,51 @@ def mask_inline_code_spans(text: str) -> str:
         while opening_end < len(text) and text[opening_end] == "`":
             opening_end += 1
         if is_escaped(text, opening):
-            cursor = opening + 1
-            continue
-        width = opening_end - opening
-        search = opening_end
-        closing_end = -1
-        while search < len(text):
-            closing = text.find("`", search)
-            if closing < 0:
-                break
-            run_end = closing
-            while run_end < len(text) and text[run_end] == "`":
-                run_end += 1
-            if run_end - closing == width:
-                between = text[opening_end:closing]
-                if re.search(r"\r?\n[ \t]*\r?\n", between) or re.search(
-                    r"\r?\n {0,3}(?:#{1,6}(?:[ \t]|$)|>[ \t]?|"
-                    r"(?:[-+*]|1[.)])[ \t]+|`{3,}|~{3,}|"
-                    r"(?:={3,}|-{3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})[ \t]*$|"
-                    r"<!--|<\?|<!\[CDATA\[|<![A-Za-z]|"
-                    r"</?(?:script|pre|style|textarea)(?:\s|>|$))",
-                    between,
-                    flags=re.MULTILINE | re.IGNORECASE,
-                ):
-                    break
-                closing_end = run_end
-                break
-            search = run_end
-        if closing_end < 0:
+            if opening_end - opening > 1:
+                run_starts.append(opening + 1)
+                run_ends.append(opening_end)
+                run_widths.append(opening_end - opening - 1)
             cursor = opening_end
             continue
+        run_starts.append(opening)
+        run_ends.append(opening_end)
+        run_widths.append(opening_end - opening)
+        cursor = opening_end
+
+    next_same_width = array("i", [-1]) * len(run_starts)
+    latest_by_width: dict[int, int] = {}
+    for run_index in range(len(run_starts) - 1, -1, -1):
+        width = run_widths[run_index]
+        next_same_width[run_index] = latest_by_width.get(width, -1)
+        latest_by_width[width] = run_index
+
+    boundaries = inline_code_block_boundaries(text)
+    spans: list[tuple[int, int, int, int]] = []
+    run_index = 0
+    while run_index < len(run_starts):
+        opening = run_starts[run_index]
+        opening_end = run_ends[run_index]
+        closing_index = next_same_width[run_index]
+        if closing_index < 0:
+            run_index += 1
+            continue
+        closing = run_starts[closing_index]
+        closing_end = run_ends[closing_index]
+        if interval_has_inline_code_boundary(boundaries, opening_end, closing):
+            run_index += 1
+            continue
+        spans.append((opening, opening_end, closing, closing_end))
+        run_index = closing_index + 1
+    return spans
+
+
+def mask_inline_code_spans(text: str) -> str:
+    """Mask CommonMark backtick code spans, including multiline spans."""
+    output = list(text)
+    for opening, _, _, closing_end in inline_code_span_ranges(text):
         for index in range(opening, closing_end):
             if output[index] not in {"\n", "\r"}:
                 output[index] = " "
-        cursor = closing_end
     return "".join(output)
 
 
@@ -1189,16 +1604,38 @@ def mark_inline_code_spans_for_boundaries(text: str) -> str:
     return "".join(output)
 
 
+def markdown_parts(
+    value: str | NormalizedMarkdown,
+) -> tuple[str, frozenset[int]]:
+    if isinstance(value, NormalizedMarkdown):
+        return value.text, value.boundary_lines
+    return value, frozenset()
+
+
+def preserve_markdown_metadata(
+    source: str | NormalizedMarkdown,
+    text: str,
+    boundary_lines: frozenset[int],
+) -> str | NormalizedMarkdown:
+    if isinstance(source, NormalizedMarkdown):
+        return NormalizedMarkdown(text, boundary_lines)
+    return text
+
+
 def mask_raw_html_blocks(
-    text: str, *, type_one_only: bool = False, mask_comments: bool = True
-) -> str:
+    text: str | NormalizedMarkdown,
+    *,
+    type_one_only: bool = False,
+    mask_comments: bool = True,
+) -> str | NormalizedMarkdown:
+    source_text, boundary_lines = markdown_parts(text)
     output: list[str] = []
     mode: str | None = None
     terminator: str | None = None
     previous_blank = True
-    for line in markdown_source_lines(text, keepends=True):
+    for line_index, line in enumerate(markdown_source_lines(source_text, keepends=True)):
         stripped_line = line.rstrip("\r\n")
-        if stripped_line == CONTAINER_BOUNDARY:
+        if line_index in boundary_lines:
             mode = None
             terminator = None
             output.append("\n" if line.endswith("\n") else "")
@@ -1275,25 +1712,30 @@ def mask_raw_html_blocks(
             continue
         output.append(line)
         previous_blank = is_markdown_blank_line(stripped_line)
-    return "".join(output)
+    return preserve_markdown_metadata(
+        text,
+        "".join(output),
+        boundary_lines,
+    )
 
 
 def mask_markdown_code(
-    text: str,
+    text: str | NormalizedMarkdown,
     *,
     mask_comments: bool = True,
     mask_indented: bool = True,
     mask_html_blocks: bool = True,
-) -> str:
+) -> str | NormalizedMarkdown:
     """Mask Markdown code and optionally comments while preserving line structure."""
+    source_text, boundary_lines = markdown_parts(text)
     output: list[str] = []
     fence_character: str | None = None
     fence_length = 0
-    for line in markdown_source_lines(text, keepends=True):
-        if line.rstrip("\r\n") == CONTAINER_BOUNDARY:
+    for line_index, line in enumerate(markdown_source_lines(source_text, keepends=True)):
+        if line_index in boundary_lines:
             fence_character = None
             fence_length = 0
-            output.append(line)
+            output.append("\n" if line.endswith("\n") else "")
             continue
         marker = re.match(r"^ {0,3}(`{3,}|~{3,})([^\r\n]*)", line)
         if marker and marker.group(1).startswith("`") and "`" in marker.group(2):
@@ -1318,13 +1760,18 @@ def mask_markdown_code(
             output.append(mask_same_shape(line))
             continue
         output.append(line)
-    result = "".join(output)
+    result: str | NormalizedMarkdown = preserve_markdown_metadata(
+        text,
+        "".join(output),
+        boundary_lines,
+    )
     if mask_html_blocks:
         result = mask_raw_html_blocks(result, mask_comments=mask_comments)
-    result = mask_inline_code_spans(result)
+    result_text, result_boundaries = markdown_parts(result)
+    result_text = mask_inline_code_spans(result_text)
     if mask_comments:
-        result = transform_html_comments(result)
-    return result
+        result_text = transform_html_comments(result_text)
+    return preserve_markdown_metadata(text, result_text, result_boundaries)
 
 
 def starts_markdown_block(content: str) -> bool:
@@ -1353,13 +1800,75 @@ def starts_markdown_block(content: str) -> bool:
     )
 
 
-def normalize_list_container_indentation(text: str) -> str:
+def blockquote_prefix_end(text: str, start: int = 0) -> int | None:
+    """Return the end of one CommonMark explicit blockquote prefix."""
+    cursor = start
+    spaces = 0
+    while cursor < len(text) and text[cursor] == " " and spaces < 3:
+        cursor += 1
+        spaces += 1
+    if cursor >= len(text) or text[cursor] != ">":
+        return None
+    cursor += 1
+    if cursor < len(text) and text[cursor] in " \t":
+        cursor += 1
+    return cursor
+
+
+def list_item_prefix_end(text: str, start: int = 0) -> int | None:
+    """Return the end of one CommonMark list-item prefix."""
+    cursor = start
+    spaces = 0
+    while cursor < len(text) and text[cursor] == " " and spaces < 3:
+        cursor += 1
+        spaces += 1
+    if cursor >= len(text):
+        return None
+    if text[cursor] in "-*+":
+        cursor += 1
+    else:
+        digit_start = cursor
+        while (
+            cursor < len(text)
+            and text[cursor].isdigit()
+            and cursor - digit_start < 9
+        ):
+            cursor += 1
+        if (
+            cursor == digit_start
+            or cursor >= len(text)
+            or text[cursor] not in ".)"
+        ):
+            return None
+        cursor += 1
+    spacing = 0
+    while cursor < len(text) and text[cursor] in " \t" and spacing < 4:
+        cursor += 1
+        spacing += 1
+    return cursor if spacing else None
+
+
+def normalize_list_container_indentation(
+    text: str | NormalizedMarkdown,
+) -> NormalizedMarkdown:
     """Expose list-item child blocks at their container-relative indentation."""
+    source_text, source_boundaries = markdown_parts(text)
     output: list[str] = []
+    output_boundaries: set[int] = set()
     containers: list[tuple[int, int]] = []
     item_re = re.compile(r"^([ \t]*)([-*+]|\d{1,9}[.)])([ \t]+)(.*)$")
 
-    for line in markdown_source_lines(text, keepends=True):
+    def append_boundary() -> None:
+        output_boundaries.add(len(output))
+        output.append("\n")
+
+    for line_index, line in enumerate(
+        markdown_source_lines(source_text, keepends=True)
+    ):
+        if line_index in source_boundaries:
+            containers.clear()
+            append_boundary()
+            continue
         body = line.rstrip("\r\n")
         ending = line[len(body) :]
         if is_markdown_blank_line(body):
@@ -1378,7 +1887,7 @@ def normalize_list_container_indentation(text: str) -> str:
                 containers.pop()
                 popped = True
             if popped:
-                output.append(CONTAINER_BOUNDARY + "\n")
+                append_boundary()
             parent_base = containers[-1][1] if containers else 0
             marker = item.group(2)
             spacing = item.group(3)
@@ -1417,72 +1926,93 @@ def normalize_list_container_indentation(text: str) -> str:
             containers.pop()
             popped = True
         if popped:
-            output.append(CONTAINER_BOUNDARY + "\n")
+            append_boundary()
         base = containers[-1][1] if containers else 0
         output.append(
             " " * max(0, indentation - base) + body[len(leading) :] + ending
         )
-    return "".join(output)
+    return NormalizedMarkdown("".join(output), frozenset(output_boundaries))
 
 
-def normalize_blockquote_container_indentation(text: str) -> str:
+def normalize_blockquote_container_indentation(
+    text: str | NormalizedMarkdown,
+) -> NormalizedMarkdown:
     """Expose explicitly marked blockquote children without joining containers."""
+    source_text, source_boundaries = markdown_parts(text)
     output: list[str] = []
+    output_boundaries: set[int] = set()
     previous_depth = 0
-    for line in markdown_source_lines(text, keepends=True):
+
+    def append_boundary() -> None:
+        output_boundaries.add(len(output))
+        output.append("\n")
+
+    for line_index, line in enumerate(
+        markdown_source_lines(source_text, keepends=True)
+    ):
+        if line_index in source_boundaries:
+            previous_depth = 0
+            append_boundary()
+            continue
         body = line.rstrip("\r\n")
         ending = line[len(body) :]
-        remainder = body
+        cursor = 0
         depth = 0
         while True:
-            quote = re.match(r"^ {0,3}>[ \t]?", remainder)
-            if quote is None:
+            prefix_end = blockquote_prefix_end(body, cursor)
+            if prefix_end is None:
                 break
-            remainder = remainder[quote.end() :]
+            cursor = prefix_end
             depth += 1
         if depth != previous_depth and (depth or previous_depth):
-            output.append(CONTAINER_BOUNDARY + "\n")
-        output.append(remainder + ending)
+            append_boundary()
+        output.append(body[cursor:] + ending)
         previous_depth = depth
-    return "".join(output)
+    return NormalizedMarkdown("".join(output), frozenset(output_boundaries))
 
 
-def normalize_markdown_containers(text: str) -> str:
+def normalize_markdown_containers(
+    text: str | NormalizedMarkdown,
+) -> NormalizedMarkdown:
     """Normalize list and explicit blockquote containers for code-aware scans."""
     listed = normalize_list_container_indentation(text)
     unquoted = normalize_blockquote_container_indentation(listed)
     return normalize_list_container_indentation(unquoted)
 
 
-def mask_explicit_blockquote_lines(text: str) -> str:
+def mask_explicit_blockquote_lines(
+    text: str | NormalizedMarkdown,
+) -> str | NormalizedMarkdown:
     """Mask blockquoted source lines when only root-level structure is valid."""
+    source_text, boundary_lines = markdown_parts(text)
     output: list[str] = []
-    for line in markdown_source_lines(text, keepends=True):
+    for line_index, line in enumerate(markdown_source_lines(source_text, keepends=True)):
+        if line_index in boundary_lines:
+            output.append("\n")
+            continue
         if re.match(r"^ {0,3}>", line):
             output.append(mask_same_shape(line))
         else:
             output.append(line)
-    return "".join(output)
+    return preserve_markdown_metadata(text, "".join(output), boundary_lines)
 
 
 def quoted_container_content(line: str) -> tuple[str, int]:
     """Return content and explicit quote depth for alternating quote/list prefixes."""
-    remainder = line.rstrip("\r\n")
+    body = line.rstrip("\r\n")
+    cursor = 0
     quote_depth = 0
-    while remainder:
-        quote = re.match(r"^ {0,3}>[ \t]?", remainder)
-        if quote is not None:
+    while cursor < len(body):
+        quote_end = blockquote_prefix_end(body, cursor)
+        if quote_end is not None:
             quote_depth += 1
-            remainder = remainder[quote.end() :]
+            cursor = quote_end
             continue
-        item = re.match(
-            r"^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]{1,4}(.*)$",
-            remainder,
-        )
-        if item is None:
+        item_end = list_item_prefix_end(body, cursor)
+        if item_end is None:
             break
-        remainder = item.group(1)
-    return remainder, quote_depth
+        cursor = item_end
+    return body[cursor:], quote_depth
 
 
 def mask_explicit_quoted_fences(text: str) -> str:
@@ -1527,13 +2057,16 @@ def markdown_task_items(text: str) -> list[tuple[str, str]]:
     normalized = normalize_markdown_containers(
         mask_inline_code_spans(mask_explicit_quoted_fences(text))
     )
-    structural = mask_markdown_code(normalized)
+    structural_value = mask_markdown_code(normalized)
+    structural, _ = markdown_parts(structural_value)
     tasks: list[tuple[str, str]] = []
     paragraph_open = False
-    normalized_lines = markdown_source_lines(normalized)
+    normalized_lines = markdown_source_lines(normalized.text)
     structural_lines = markdown_source_lines(structural)
-    for normalized_line, line in zip(normalized_lines, structural_lines):
-        if normalized_line.strip() == CONTAINER_BOUNDARY:
+    for line_index, (normalized_line, line) in enumerate(
+        zip(normalized_lines, structural_lines)
+    ):
+        if line_index in normalized.boundary_lines:
             continue
         task_match = CHECKBOX_RE.match(line)
         spacing_columns = 0
@@ -1577,29 +2110,27 @@ def mask_index_markdown(text: str) -> str:
     """Mask code/comments while retaining only the four exact lifecycle markers."""
     markers = (ACTIVE_START, ACTIVE_END, COMPLETED_START, COMPLETED_END)
     protected = mask_markdown_code(text, mask_comments=False)
-    sentinels: dict[str, str] = {}
-    for index, marker in enumerate(markers):
-        sentinel = f"\ue000HARNESS_LIFECYCLE_MARKER_{index}\ue001"
-        while sentinel in protected:
-            sentinel += "\ue002"
-        sentinels[sentinel] = marker
-        comment_spans = valid_html_comment_spans(protected)
-
-        def protect(match: re.Match[str]) -> str:
-            nested = any(
-                start <= match.start() < end
-                and (start < match.start() or end > match.end())
-                for start, end in comment_spans
-            )
-            return match.group(0) if nested else sentinel
-
-        protected = re.sub(
-            rf"(?m)^{re.escape(marker)}[ \t]*$", protect, protected
-        )
-    masked = transform_html_comments(protected)
-    for sentinel, marker in sentinels.items():
-        masked = masked.replace(sentinel, marker)
-    return masked
+    assert isinstance(protected, str)
+    comment_spans = valid_html_comment_spans(protected)
+    marker_pattern = "|".join(re.escape(marker) for marker in markers)
+    retained_spans: set[tuple[int, int]] = set()
+    span_index = 0
+    for match in re.finditer(rf"(?m)^({marker_pattern})[ \t]*$", protected):
+        while (
+            span_index < len(comment_spans)
+            and comment_spans[span_index][1] <= match.start()
+        ):
+            span_index += 1
+        marker_span = (match.start(1), match.end(1))
+        if (
+            span_index < len(comment_spans)
+            and comment_spans[span_index] == marker_span
+        ):
+            retained_spans.add(marker_span)
+    return mask_spans(
+        protected,
+        (span for span in comment_spans if span not in retained_spans),
+    )
 
 
 def is_escaped(text: str, index: int) -> bool:
@@ -1639,19 +2170,209 @@ def closing_square_bracket(text: str, opening: int) -> int:
     return -1
 
 
-def closing_inline_link_parenthesis(text: str, opening: int) -> int:
-    """Return the first closing parenthesis that yields valid inline-link content."""
+def closing_inline_link_parenthesis(
+    text: str,
+    opening: int,
+    *,
+    budget: MarkdownParseBudget | None = None,
+) -> int:
+    """Return a valid outer inline-link closer after one cursor scan."""
     start = opening + 1
     cursor = start
-    while cursor < len(text):
+
+    available = (
+        len(text) - start
+        if budget is None
+        else max(1, budget.work_remaining // 2)
+    )
+    limit = min(len(text), start + available)
+
+    def finish(result: int) -> int:
+        if budget is not None and not budget.consume_work(
+            max(1, (cursor - start + 1) * 2)
+        ):
+            return MARKDOWN_PARSE_BUDGET_EXCEEDED
+        return result
+
+    def exhausted_or_invalid() -> int:
+        if limit < len(text) and cursor >= limit:
+            return MARKDOWN_PARSE_BUDGET_EXCEEDED
+        return finish(-1)
+
+    while cursor < limit and text[cursor] in " \t\r\n":
+        cursor += 1
+    if cursor >= limit:
+        return exhausted_or_invalid()
+    if text[cursor] == ")":
+        return finish(
+            cursor
+            if normalized_link_destination(text[start:cursor]) is not None
+            else -1
+        )
+
+    if text[cursor] == "<":
+        cursor += 1
+        while cursor < limit:
+            if text[cursor] == "\\":
+                cursor += 2
+                continue
+            if text[cursor] in "\r\n" or text[cursor] == "<":
+                return finish(-1)
+            if text[cursor] == ">":
+                cursor += 1
+                break
+            cursor += 1
+        else:
+            return exhausted_or_invalid()
+    else:
+        parenthesis_depth = 0
+        while cursor < limit:
+            character = text[cursor]
+            if character == "\\":
+                cursor += 2
+                continue
+            if character in " \t\r\n":
+                break
+            if character == "(":
+                parenthesis_depth += 1
+                if parenthesis_depth > 32:
+                    return finish(-1)
+            elif character == ")":
+                if parenthesis_depth == 0:
+                    return finish(
+                        cursor
+                        if normalized_link_destination(text[start:cursor]) is not None
+                        else -1
+                    )
+                parenthesis_depth -= 1
+            cursor += 1
+        if parenthesis_depth:
+            return exhausted_or_invalid()
+
+    if cursor >= limit:
+        return exhausted_or_invalid()
+    if text[cursor] not in " \t\r\n)":
+        return finish(-1)
+    while cursor < limit and text[cursor] in " \t\r\n":
+        cursor += 1
+    if cursor >= limit:
+        return exhausted_or_invalid()
+    if text[cursor] == ")":
+        return finish(
+            cursor
+            if normalized_link_destination(text[start:cursor]) is not None
+            else -1
+        )
+
+    opener = text[cursor]
+    if opener not in {"\"", "'", "("}:
+        return finish(-1)
+    closer = ")" if opener == "(" else opener
+    cursor += 1
+    while cursor < limit:
         if text[cursor] == "\\":
             cursor += 2
             continue
-        if text[cursor] == ")":
-            if normalized_link_destination(text[start:cursor]) is not None:
-                return cursor
+        if text[cursor] == closer:
+            cursor += 1
+            break
         cursor += 1
-    return -1
+    else:
+        return exhausted_or_invalid()
+    while cursor < limit and text[cursor] in " \t\r\n":
+        cursor += 1
+    if cursor >= limit:
+        return exhausted_or_invalid()
+    if text[cursor] != ")":
+        return finish(-1)
+    return finish(
+        cursor
+        if normalized_link_destination(text[start:cursor]) is not None
+        else -1
+    )
+
+
+INLINE_AUTOLINK_URI_RE = re.compile(
+    r"<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\x00-\x20]*>"
+)
+INLINE_AUTOLINK_EMAIL_RE = re.compile(
+    r"<[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+>"
+)
+
+
+def inline_special_html_spans(text: str) -> list[tuple[int, int]]:
+    """Scan processing instructions, declarations, CDATA, and autolinks once."""
+    exhausted_closers = {
+        "pi": False,
+        "cdata": False,
+        "declaration": False,
+    }
+
+    def next_closer(kind: str, token: str, minimum: int) -> int:
+        if exhausted_closers[kind]:
+            return -1
+        found = text.find(token, minimum)
+        if found < 0:
+            exhausted_closers[kind] = True
+        return found
+
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    while cursor < len(text):
+        start = text.find("<", cursor)
+        if start < 0:
+            break
+        if is_escaped(text, start):
+            cursor = start + 1
+            continue
+        if text.startswith("<?", start):
+            close = next_closer("pi", "?>", start + 2)
+            if close < 0:
+                cursor = start + 2
+                continue
+            spans.append((start, close + 2))
+            cursor = close + 2
+            continue
+        if text.startswith("<![CDATA[", start):
+            close = next_closer("cdata", "]]>", start + 9)
+            if close < 0:
+                cursor = start + 9
+                continue
+            spans.append((start, close + 3))
+            cursor = close + 3
+            continue
+        if (
+            start + 2 < len(text)
+            and text.startswith("<!", start)
+            and text[start + 2].isalpha()
+            and text[start + 2].isascii()
+        ):
+            close = next_closer("declaration", ">", start + 3)
+            if close < 0:
+                cursor = start + 3
+                continue
+            spans.append((start, close + 1))
+            cursor = close + 1
+            continue
+
+        end = start + 1
+        while end < len(text) and text[end] not in "<>":
+            end += 1
+        if end >= len(text):
+            break
+        if text[end] == "<":
+            cursor = end
+            continue
+        candidate = text[start : end + 1]
+        if (
+            INLINE_AUTOLINK_URI_RE.fullmatch(candidate)
+            or INLINE_AUTOLINK_EMAIL_RE.fullmatch(candidate)
+        ):
+            spans.append((start, end + 1))
+        cursor = end + 1
+    return spans
 
 
 def inline_html_tag_spans(text: str) -> list[tuple[int, int]]:
@@ -1661,21 +2382,7 @@ def inline_html_tag_spans(text: str) -> list[tuple[int, int]]:
         for match in INLINE_HTML_TAG_RE.finditer(text)
         if not is_escaped(text, match.start())
     ]
-    token_patterns = (
-        r"<\?.*?\?>",
-        r"<!\[CDATA\[.*?\]\]>",
-        r"<![A-Za-z][^>]*>",
-        r"<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\x00-\x20]*>",
-        r"<[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
-        r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
-        r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+>",
-    )
-    for pattern in token_patterns:
-        spans.extend(
-            match.span()
-            for match in re.finditer(pattern, text, re.DOTALL)
-            if not is_escaped(text, match.start())
-        )
+    spans.extend(inline_special_html_spans(text))
     merged: list[tuple[int, int]] = []
     for start, end in sorted(spans):
         if merged and start <= merged[-1][1]:
@@ -1695,18 +2402,16 @@ def mask_spans(text: str, spans: Iterable[tuple[int, int]]) -> str:
 
 
 def line_has_blockquote_container(line: str) -> bool:
-    remainder = line.rstrip("\r\n")
+    body = line.rstrip("\r\n")
+    cursor = 0
     for _ in range(64):
-        quote = re.match(r"^ {0,3}>", remainder)
-        if quote is not None:
+        quote_end = blockquote_prefix_end(body, cursor)
+        if quote_end is not None:
             return True
-        item = re.match(
-            r"^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]{1,4}(.*)$",
-            remainder,
-        )
-        if item is None:
+        item_end = list_item_prefix_end(body, cursor)
+        if item_end is None:
             return False
-        remainder = item.group(1)
+        cursor = item_end
     return True
 
 
@@ -1807,27 +2512,31 @@ def markdown_bracket_nesting_exceeds(text: str, limit: int) -> bool:
     return False
 
 
-def scan_markdown_links(
+def _scan_markdown_links_with_budget(
     text: str,
     *,
-    include_images: bool = True,
-    _depth: int = 0,
-) -> tuple[list[str], list[str]]:
+    include_images: bool,
+    depth: int,
+    budget: MarkdownParseBudget,
+) -> tuple[list[str], list[str], bool]:
     """Extract inline/reference links and unresolved reference labels."""
-    if _depth >= MAX_MARKDOWN_LINK_NESTING:
-        return [], [MARKDOWN_LINK_NESTING_SENTINEL]
+    if depth >= MAX_MARKDOWN_LINK_NESTING:
+        return [], [MARKDOWN_LINK_NESTING_SENTINEL], False
+    if not budget.consume_work(len(text)):
+        return [], [MARKDOWN_PARSE_BUDGET_SENTINEL], False
     prepared = mask_explicit_quoted_fences(text)
     normalized = normalize_markdown_containers(mask_inline_code_spans(prepared))
     boundary_source = normalize_markdown_containers(
         mark_inline_code_spans_for_boundaries(prepared)
     )
-    text = mask_markdown_code(normalized)
+    structural_value = mask_markdown_code(normalized)
+    text, structural_boundaries = markdown_parts(structural_value)
     bracket_source = mask_spans(text, inline_html_tag_spans(text))
     if markdown_bracket_nesting_exceeds(
         bracket_source, MAX_MARKDOWN_LINK_NESTING
     ):
-        return [], [MARKDOWN_LINK_NESTING_SENTINEL]
-    normalized_lines = markdown_source_lines(boundary_source)
+        return [], [MARKDOWN_LINK_NESTING_SENTINEL], False
+    normalized_lines = markdown_source_lines(boundary_source.text)
     structural_lines = markdown_source_lines(text)
     line_chunks = markdown_source_lines(text, keepends=True)
     line_offsets: list[int] = []
@@ -1842,7 +2551,9 @@ def scan_markdown_links(
     while line_index < min(len(normalized_lines), len(structural_lines)):
         source_line = normalized_lines[line_index]
         structural_line = structural_lines[line_index]
-        if structural_line.strip() == CONTAINER_BOUNDARY:
+        if line_index in (
+            structural_boundaries | boundary_source.boundary_lines
+        ):
             paragraph_open = False
             line_index += 1
             continue
@@ -1886,6 +2597,7 @@ def scan_markdown_links(
     html_index = 0
     destinations: list[str] = []
     missing_references: list[str] = []
+    navigation_found = False
     index = 0
     while index < len(text):
         open_bracket = text.find("[", index)
@@ -1914,27 +2626,46 @@ def scan_markdown_links(
         if re.search(r"\r?\n[ \t]*\r?\n", link_text):
             index = open_bracket + 1
             continue
-        nested_navigation: list[str] = []
         nested_missing: list[str] = []
         nested_all: list[str] = []
+        nested_navigation = False
         if not is_image:
-            nested_navigation, nested_missing = scan_markdown_links(
-                link_text, include_images=False, _depth=_depth + 1
+            (
+                nested_all,
+                nested_missing,
+                nested_navigation,
+            ) = _scan_markdown_links_with_budget(
+                link_text,
+                include_images=include_images,
+                depth=depth + 1,
+                budget=budget,
             )
-            nested_all = nested_navigation
-            if include_images:
-                nested_all, nested_missing_all = scan_markdown_links(
-                    link_text, include_images=True, _depth=_depth + 1
-                )
-                nested_missing = list(dict.fromkeys(nested_missing + nested_missing_all))
         if nested_all:
             destinations.extend(nested_all)
+        navigation_found = navigation_found or nested_navigation
         if nested_missing:
             missing_references.extend(nested_missing)
+            if any(
+                item
+                in {
+                    MARKDOWN_LINK_NESTING_SENTINEL,
+                    MARKDOWN_PARSE_BUDGET_SENTINEL,
+                    MARKDOWN_RESULT_BUDGET_SENTINEL,
+                }
+                for item in nested_missing
+            ):
+                return destinations, missing_references, navigation_found
         nested_link = bool(nested_navigation or nested_missing)
         following = close_bracket + 1
         if following < len(text) and text[following] == "(":
-            closing = closing_inline_link_parenthesis(text, following)
+            closing = closing_inline_link_parenthesis(
+                text,
+                following,
+                budget=budget,
+            )
+            if closing == MARKDOWN_PARSE_BUDGET_EXCEEDED:
+                missing_references.append(MARKDOWN_PARSE_BUDGET_SENTINEL)
+                return destinations, missing_references, navigation_found
             if closing >= 0:
                 raw_destination = text[following + 1 : closing]
                 if (
@@ -1943,7 +2674,12 @@ def scan_markdown_links(
                     normalized_link_destination(raw_destination) is not None
                     and (include_images or not is_image)
                 ):
+                    if not budget.consume_result():
+                        missing_references.append(MARKDOWN_RESULT_BUDGET_SENTINEL)
+                        return destinations, missing_references, navigation_found
                     destinations.append(raw_destination)
+                    if not is_image:
+                        navigation_found = True
                 index = closing + 1
             else:
                 index = open_bracket + 1
@@ -1959,14 +2695,24 @@ def scan_markdown_links(
                     and label in definitions
                     and (include_images or not is_image)
                 ):
+                    if not budget.consume_result():
+                        missing_references.append(MARKDOWN_RESULT_BUDGET_SENTINEL)
+                        return destinations, missing_references, navigation_found
                     destinations.append(definitions[label])
+                    if not is_image:
+                        navigation_found = True
                 elif (
                     not nested_link
                     and label is not None
                     and label not in definitions
                     and (include_images or not is_image)
                 ):
+                    if not budget.consume_result():
+                        missing_references.append(MARKDOWN_RESULT_BUDGET_SENTINEL)
+                        return destinations, missing_references, navigation_found
                     missing_references.append(raw_label)
+                    if not is_image:
+                        navigation_found = True
                 index = reference_end + 1
                 continue
         label = valid_reference_label(link_text)
@@ -1976,9 +2722,31 @@ def scan_markdown_links(
             and label in definitions
             and (include_images or not is_image)
         ):
+            if not budget.consume_result():
+                missing_references.append(MARKDOWN_RESULT_BUDGET_SENTINEL)
+                return destinations, missing_references, navigation_found
             destinations.append(definitions[label])
+            if not is_image:
+                navigation_found = True
         index = close_bracket + 1
-    return destinations, missing_references
+    return destinations, missing_references, navigation_found
+
+
+def scan_markdown_links(
+    text: str,
+    *,
+    include_images: bool = True,
+    _depth: int = 0,
+) -> tuple[list[str], list[str]]:
+    """Extract links with shared deterministic recursion and result budgets."""
+    budget = MarkdownParseBudget(len(text))
+    destinations, missing, _ = _scan_markdown_links_with_budget(
+        text,
+        include_images=include_images,
+        depth=_depth,
+        budget=budget,
+    )
+    return destinations, missing
 
 
 def markdown_link_destinations(text: str) -> list[str]:
@@ -2054,16 +2822,172 @@ def revision_history_is_structured(text: str) -> bool:
     return True
 
 
-def markdown_heading_slug(value: str) -> str:
+def live_markdown_reference_labels(text: str) -> set[str]:
+    """Return live CommonMark reference definitions with block context."""
+    prepared = mask_explicit_quoted_fences(text)
+    normalized = normalize_markdown_containers(mask_inline_code_spans(prepared))
+    boundary_source = normalize_markdown_containers(
+        mark_inline_code_spans_for_boundaries(prepared)
+    )
+    structural_value = mask_markdown_code(normalized)
+    structural, structural_boundaries = markdown_parts(structural_value)
+    source_lines = markdown_source_lines(boundary_source.text)
+    structural_lines = markdown_source_lines(structural)
+    boundaries = structural_boundaries | boundary_source.boundary_lines
+    definitions: set[str] = set()
+    paragraph_open = False
+    line_index = 0
+    while line_index < min(len(source_lines), len(structural_lines)):
+        source_line = source_lines[line_index]
+        structural_line = structural_lines[line_index]
+        if line_index in boundaries:
+            paragraph_open = False
+            line_index += 1
+            continue
+        if is_markdown_blank_line(structural_line):
+            if is_markdown_blank_line(source_line):
+                paragraph_open = False
+            elif INLINE_CODE_BOUNDARY in source_line:
+                paragraph_open = True
+            else:
+                paragraph_open = False
+            line_index += 1
+            continue
+        if not paragraph_open:
+            parsed = reference_definition_candidate(structural_lines, line_index)
+            if parsed is not None:
+                label, _, consumed = parsed
+                definitions.add(label)
+                line_index += consumed
+                continue
+        paragraph_open = not markdown_line_ends_paragraph(structural_line)
+        line_index += 1
+    return definitions
+
+
+def strip_heading_link_markup(
+    value: str,
+    reference_labels: set[str] | frozenset[str] = frozenset(),
+) -> str:
+    """Keep rendered heading labels while discarding bounded link destinations."""
+    if not value:
+        return value
+    budget = MarkdownParseBudget(len(value))
+    if not budget.consume_work(len(value)):
+        return ""
+    code_spans = inline_code_span_ranges(value)
+    code_by_opening = {
+        opening: (opening_end, closing, closing_end)
+        for opening, opening_end, closing, closing_end in code_spans
+    }
+    bracket_source = mask_spans(
+        value,
+        (
+            (opening, closing_end)
+            for opening, _, _, closing_end in code_spans
+        ),
+    )
+    closing_by_open = array("i", [-1]) * len(value)
+    opening_by_close = array("i", [-1]) * len(value)
+    stack = array("i")
+    scan = 0
+    while scan < len(value):
+        if bracket_source[scan] == "\\":
+            scan += 2
+            continue
+        if bracket_source[scan] == "[":
+            stack.append(scan)
+        elif bracket_source[scan] == "]" and stack:
+            opening = stack.pop()
+            closing_by_open[opening] = scan
+            opening_by_close[scan] = opening
+        scan += 1
+
+    output: list[str] = []
+    cursor = 0
+    while cursor < len(value):
+        code_span = code_by_opening.get(cursor)
+        if code_span is not None:
+            opening_end, closing, closing_end = code_span
+            rendered_code = re.sub(
+                r"\r\n|\r|\n",
+                " ",
+                value[opening_end:closing],
+            )
+            if (
+                rendered_code.startswith(" ")
+                and rendered_code.endswith(" ")
+                and rendered_code.strip(" ")
+            ):
+                rendered_code = rendered_code[1:-1]
+            output.append(rendered_code)
+            cursor = closing_end
+            continue
+        if (
+            value[cursor] == "!"
+            and cursor + 1 < len(value)
+            and value[cursor + 1] == "["
+            and closing_by_open[cursor + 1] >= 0
+            and not is_escaped(value, cursor)
+        ):
+            cursor += 1
+            continue
+        if (
+            value[cursor] == "["
+            and closing_by_open[cursor] >= 0
+            and not is_escaped(value, cursor)
+        ):
+            cursor += 1
+            continue
+        if (
+            value[cursor] == "]"
+            and opening_by_close[cursor] >= 0
+            and not is_escaped(value, cursor)
+        ):
+            following = cursor + 1
+            if following < len(value) and value[following] == "(":
+                destination_end = closing_inline_link_parenthesis(
+                    value,
+                    following,
+                    budget=budget,
+                )
+                if destination_end == MARKDOWN_PARSE_BUDGET_EXCEEDED:
+                    return ""
+                if destination_end >= 0:
+                    cursor = destination_end + 1
+                    continue
+            elif (
+                following < len(value)
+                and value[following] == "["
+                and closing_by_open[following] >= 0
+            ):
+                reference_end = closing_by_open[following]
+                raw_label = (
+                    value[following + 1 : reference_end]
+                    or value[opening_by_close[cursor] + 1 : cursor]
+                )
+                label = valid_reference_label(raw_label)
+                if label is not None and label in reference_labels:
+                    cursor = reference_end + 1
+                    continue
+            cursor = following
+            continue
+        output.append(value[cursor])
+        cursor += 1
+    return "".join(output)
+
+
+def markdown_heading_slug(
+    value: str,
+    reference_labels: set[str] | frozenset[str] = frozenset(),
+) -> str:
     value = transform_html_comments(value, collapse=True)
     value = re.sub(
         r"</?[A-Za-z][A-Za-z0-9-]*(?:[ \t]+[^<>]*)?/?>",
         "",
         value,
     )
-    value = re.sub(r"!?\[([^\]]+)\]\([^)]*\)", r"\1", value)
-    value = re.sub(r"!?\[([^\]]+)\]\[[^\]]*\]", r"\1", value)
-    value = re.sub(r"!?\[([^\]]+)\]", r"\1", value)
+    value = strip_heading_link_markup(value, reference_labels)
     value = commonmark_unescape_entities(markdown_unescape(value))
     value = re.sub(r"[`*_~]", "", value).strip().casefold()
     value = re.sub(r"[^\w\- ]", "", value, flags=re.UNICODE)
@@ -2072,17 +2996,36 @@ def markdown_heading_slug(value: str) -> str:
 
 def markdown_anchors(text: str) -> set[str]:
     normalized = normalize_markdown_containers(text)
-    structural = mask_markdown_code(normalized)
-    anchor_source = mask_raw_html_blocks(
-        mask_markdown_code(normalized, mask_html_blocks=False),
+    structural_value = mask_markdown_code(normalized)
+    structural, _ = markdown_parts(structural_value)
+    code_only = mask_markdown_code(normalized, mask_html_blocks=False)
+    anchor_value = mask_raw_html_blocks(
+        code_only,
         type_one_only=True,
     )
+    anchor_source, _ = markdown_parts(anchor_value)
+    reference_labels = live_markdown_reference_labels(text)
     anchors: set[str] = set()
     counts: Counter[str] = Counter()
     for match in re.finditer(
         r"(?m)^[ \t]{0,3}#{1,6}\s+(.+?)\s*#*\s*$", structural
     ):
-        base = markdown_heading_slug(match.group(1))
+        raw_heading_line = normalized.text[match.start() : match.end()]
+        heading_prefix = re.match(
+            r"^[ \t]{0,3}#{1,6}\s+",
+            raw_heading_line,
+        )
+        if heading_prefix is None:
+            continue
+        rendered_heading_source = re.sub(
+            r"[ \t]+#+[ \t]*$",
+            "",
+            raw_heading_line[heading_prefix.end() :],
+        ).rstrip(" \t")
+        base = markdown_heading_slug(
+            rendered_heading_source,
+            reference_labels,
+        )
         if not base:
             continue
         number = counts[base]
@@ -2131,6 +3074,7 @@ def resolve_markdown_link(root: Path, source: Path, raw: str) -> tuple[Path | No
 
 
 def markdown_files(root: Path, report: Report | None = None) -> Iterable[Path]:
+    root = root.resolve()
     excluded = {
         ".git",
         ".hg",
@@ -2147,12 +3091,14 @@ def markdown_files(root: Path, report: Report | None = None) -> Iterable[Path]:
         "build",
         "target",
     }
-    discovered: list[Path] = []
+    walk_entries = 0
+    markdown_count = 0
+    path_bytes = 0
+    aggregate_bytes = 0
 
-    def walk_error(error: OSError) -> None:
+    def walk_error(path: Path, error: OSError) -> None:
         if report is None:
             return
-        path = Path(error.filename) if error.filename else root
         report.add(
             "LINK000",
             "error",
@@ -2161,26 +3107,92 @@ def markdown_files(root: Path, report: Report | None = None) -> Iterable[Path]:
             "Restore read permission or explicitly exclude the path through project policy.",
         )
 
-    for current, directories, files in os.walk(
-        root,
-        followlinks=False,
-        onerror=walk_error,
-    ):
-        current_path = Path(current)
-        directories[:] = sorted(
-            name
-            for name in directories
-            if name not in excluded and not (current_path / name).is_symlink()
+    def limit_exceeded(reason: str) -> None:
+        if report is None:
+            return
+        report.add(
+            "LINK005",
+            "error",
+            ".",
+            f"Markdown traversal stopped at a deterministic resource limit: {reason}.",
+            "Reduce or explicitly exclude generated documentation, then rerun the complete check.",
         )
-        for name in sorted(files):
+        report.mark_incomplete()
+
+    pending = [root]
+    while pending:
+        current_path = pending.pop()
+        entries: list[tuple[str, os.stat_result]] = []
+        try:
+            with os.scandir(current_path) as iterator:
+                for entry in iterator:
+                    walk_entries += 1
+                    if walk_entries > MAX_REPOSITORY_WALK_ENTRIES:
+                        limit_exceeded(
+                            f"more than {MAX_REPOSITORY_WALK_ENTRIES} repository entries"
+                        )
+                        return
+                    try:
+                        metadata = entry.stat(follow_symlinks=False)
+                    except OSError as exc:
+                        walk_error(current_path / entry.name, exc)
+                        continue
+                    if (
+                        stat.S_ISREG(metadata.st_mode)
+                        and Path(entry.name).suffix.casefold()
+                        in {".md", ".markdown"}
+                    ):
+                        relative = (
+                            (current_path / entry.name)
+                            .relative_to(root)
+                            .as_posix()
+                        )
+                        candidate_path_bytes = len(os.fsencode(relative))
+                        if markdown_count >= MAX_MARKDOWN_FILES:
+                            limit_exceeded(
+                                f"more than {MAX_MARKDOWN_FILES} Markdown files"
+                            )
+                            return
+                        if (
+                            path_bytes + candidate_path_bytes
+                            > MAX_MARKDOWN_PATH_BYTES
+                        ):
+                            limit_exceeded(
+                                f"more than {MAX_MARKDOWN_PATH_BYTES} Markdown path bytes"
+                            )
+                            return
+                        if (
+                            aggregate_bytes + metadata.st_size
+                            > MAX_MARKDOWN_AGGREGATE_BYTES
+                        ):
+                            limit_exceeded(
+                                f"more than {MAX_MARKDOWN_AGGREGATE_BYTES} declared Markdown bytes"
+                            )
+                            return
+                        markdown_count += 1
+                        path_bytes += candidate_path_bytes
+                        aggregate_bytes += metadata.st_size
+                    entries.append((entry.name, metadata))
+        except OSError as exc:
+            walk_error(current_path, exc)
+            continue
+
+        directories: list[Path] = []
+        for name, metadata in sorted(entries, key=lambda item: item[0]):
             path = current_path / name
+            if stat.S_ISLNK(metadata.st_mode):
+                continue
+            if stat.S_ISDIR(metadata.st_mode):
+                if name not in excluded:
+                    directories.append(path)
+                continue
             if (
-                Path(name).suffix.casefold() in {".md", ".markdown"}
-                and not path.is_symlink()
-                and path.is_file()
+                not stat.S_ISREG(metadata.st_mode)
+                or Path(name).suffix.casefold() not in {".md", ".markdown"}
             ):
-                discovered.append(path)
-    yield from sorted(discovered)
+                continue
+            yield path
+        pending.extend(reversed(directories))
 
 
 def check_text_links(
@@ -2207,6 +3219,24 @@ def check_text_links(
                 relative_display(root, source),
                 f"Markdown link labels exceed the {MAX_MARKDOWN_LINK_NESTING}-level nesting limit.",
                 "Flatten nested link/image labels so routing and link validation remain bounded and reviewable.",
+            )
+            continue
+        if label == MARKDOWN_PARSE_BUDGET_SENTINEL:
+            report.add(
+                "LINK003",
+                "error",
+                relative_display(root, source),
+                "Markdown link parsing exceeded its deterministic shared work budget.",
+                "Reduce repeated nested link-label structure before rerunning the checker.",
+            )
+            continue
+        if label == MARKDOWN_RESULT_BUDGET_SENTINEL:
+            report.add(
+                "LINK004",
+                "error",
+                relative_display(root, source),
+                f"Markdown link diagnostics exceed the {MAX_MARKDOWN_LINK_RESULTS:,}-result safety limit.",
+                "Split or repair the document; the checker remains failed until every link can be reviewed within the bounded result set.",
             )
             continue
         report.add(
@@ -2408,12 +3438,15 @@ def is_substantive_lifecycle_fact(value: str, *, minimum_alnum: int = 2) -> bool
     return len(re.findall(r"[\w]", visible, flags=re.UNICODE)) >= minimum_alnum
 
 
-def is_substantive_owner(value: str) -> bool:
+def is_substantive_owner(value: object) -> bool:
     """Require an assigned durable role/team, not a pending-assignment phrase."""
+    if type(value) is not str or len(value) > MAX_OWNER_CHARS:
+        return False
     if not is_substantive_lifecycle_fact(value):
         return False
     normalized = re.sub(r"\s+", " ", visible_markdown_cell(value).casefold()).strip()
-    tokens = set(re.findall(r"[a-z0-9]+", normalized))
+    token_list = re.findall(r"[a-z0-9]+", normalized)
+    tokens = set(token_list)
     if tokens & {
         "awaiting",
         "forthcoming",
@@ -2429,42 +3462,158 @@ def is_substantive_owner(value: str) -> bool:
         "unowned",
     }:
         return False
-    absence_patterns = (
-        r"\bnot\b.*\b(?:assign(?:ed|ment)?|selected|named|confirmed|determined)\b",
-        r"\bno\b.*\b(?:owner|assignee|team|role|assign(?:ed|ment)?)\b",
-        r"\bwithout\b.*\b(?:owner|assignee|team|role)\b",
-        r"\b(?:owner|assignee|team|role)\b.*\bto be assigned\b",
-        r"\bto be (?:assigned|confirmed|determined|named|selected)\b",
-        r"\b(?:to|yet to) assign\b",
-        r"\bneeds?\b.*\bassign(?:ed|ment)?\b",
-        r"\bassign(?:ed|ment)?\b.*\blater\b",
+    authority_words = {"owner", "assignee", "team", "role"}
+    assignment_words = {
+        "assign",
+        "assigned",
+        "assignment",
+        "confirm",
+        "confirmed",
+        "determine",
+        "determined",
+        "name",
+        "named",
+        "select",
+        "selected",
+    }
+    if tokens & {"not", "no", "without", "need", "needs"} and (
+        tokens & authority_words or tokens & assignment_words
+    ):
+        return False
+    if tokens & assignment_words and tokens & {"later"}:
+        return False
+    phrases = (
+        "to be assigned",
+        "to be confirmed",
+        "to be determined",
+        "to be named",
+        "to be selected",
+        "to assign",
+        "yet to assign",
     )
-    return not any(re.search(pattern, normalized) for pattern in absence_patterns)
+    return not any(phrase in normalized for phrase in phrases)
+
+
+@dataclass(frozen=True)
+class SemanticReviewAttestation:
+    start: int
+    end: int
+    reviewer: str
+    reviewed_at: str
+    content_sha256: str
+    evidence: str
+
+
+SEMANTIC_REVIEW_RE = re.compile(
+    r"^[ \t]{1,3}Semantic-Review:[ \t]*"
+    rf"reviewer=([^;\r\n]{{1,{MAX_OWNER_CHARS}}});[ \t]*"
+    r"reviewed-at=(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}Z);[ \t]*"
+    r"content-sha256=([0-9a-fA-F]{64});[ \t]*"
+    rf"evidence=(.{{1,{MAX_REVIEW_EVIDENCE_CHARS}}})$",
+    re.IGNORECASE,
+)
+
+
+def revision_history_source_span(text: str, structural: str) -> tuple[int, int] | None:
+    headings = list(H2_RE.finditer(structural))
+    matches = [
+        (index, match)
+        for index, match in enumerate(headings)
+        if match.group(1).strip() == "Revision History"
+    ]
+    if len(matches) != 1:
+        return None
+    index, match = matches[0]
+    end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+    return match.end(), end
+
+
+def live_semantic_review_attestations(text: str) -> list[SemanticReviewAttestation]:
+    """Return visible attestations from the real Revision History section only."""
+    structural = mask_markdown_code(mask_navigation_blockquotes(text))
+    span = revision_history_source_span(text, structural)
+    if span is None:
+        return []
+    section_start, section_end = span
+    structural_section = structural[section_start:section_end]
+    attestations: list[SemanticReviewAttestation] = []
+    cursor = 0
+    for structural_line in markdown_source_lines(structural_section, keepends=True):
+        structural_body = structural_line.rstrip("\r\n")
+        line_ending_length = len(structural_line) - len(structural_body)
+        raw_start = section_start + cursor
+        raw_end = raw_start + len(structural_body)
+        raw_body = text[raw_start:raw_end]
+        structural_match = SEMANTIC_REVIEW_RE.fullmatch(structural_body)
+        raw_match = SEMANTIC_REVIEW_RE.fullmatch(raw_body)
+        if structural_match is not None and raw_match is not None:
+            reviewer, reviewed_at, content_sha256, evidence = (
+                part.strip() for part in raw_match.groups()
+            )
+            attestations.append(
+                SemanticReviewAttestation(
+                    start=raw_start,
+                    end=raw_end + line_ending_length,
+                    reviewer=reviewer,
+                    reviewed_at=reviewed_at,
+                    content_sha256=content_sha256.casefold(),
+                    evidence=evidence,
+                )
+            )
+        cursor += len(structural_line)
+    return attestations
+
+
+def semantic_review_content_sha256(text: str) -> str | None:
+    """Hash exact plan bytes after removing its one visible attestation line."""
+    attestations = live_semantic_review_attestations(text)
+    if len(attestations) != 1:
+        return None
+    attestation = attestations[0]
+    canonical = text[: attestation.start] + text[attestation.end :]
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def semantic_review_attestation_is_valid(text: str) -> bool:
-    """Validate the local durable completion-review attestation."""
-    pattern = re.compile(
-        r"^[ \t]+Semantic-Review:[ \t]*"
-        r"reviewer=([^;\r\n]+);[ \t]*"
-        r"reviewed-at=([^;\r\n]+);[ \t]*"
-        r"evidence=(.+)$",
-        re.IGNORECASE,
+    """Validate visible, final-revision evidence bound to the current plan bytes."""
+    attestations = live_semantic_review_attestations(text)
+    if len(attestations) != 1:
+        return False
+    attestation = attestations[0]
+    structural = mask_markdown_code(mask_navigation_blockquotes(text))
+    span = revision_history_source_span(text, structural)
+    if span is None:
+        return False
+    section_start, section_end = span
+    revision = structural[section_start:section_end]
+    entry_re = re.compile(
+        r"(?m)^[ \t]{0,3}[-*+]\s+"
+        r"\((\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}Z)\)\s+Change:"
     )
-    for line in markdown_source_lines(text):
-        match = pattern.fullmatch(line)
-        if match is None:
-            continue
-        reviewer, reviewed_at, evidence = (part.strip() for part in match.groups())
-        if (
-            is_substantive_owner(reviewer)
-            and valid_utc_timestamp(reviewed_at)
-            and substantive_length(evidence) >= 80
-            and not has_unresolved_marker(evidence)
-            and not contains_raw_html_markup(evidence)
-        ):
-            return True
-    return False
+    entries = list(entry_re.finditer(revision))
+    if not entries:
+        return False
+    final_entry = entries[-1]
+    if attestation.start <= section_start + final_entry.start():
+        return False
+    try:
+        reviewed_at = datetime.strptime(attestation.reviewed_at, "%Y-%m-%d %H:%MZ")
+        final_revision_at = datetime.strptime(
+            final_entry.group(1), "%Y-%m-%d %H:%MZ"
+        )
+    except ValueError:
+        return False
+    current_digest = semantic_review_content_sha256(text)
+    return bool(
+        is_substantive_owner(attestation.reviewer)
+        and reviewed_at >= final_revision_at
+        and reviewed_at <= datetime.now(timezone.utc).replace(tzinfo=None)
+        and current_digest == attestation.content_sha256
+        and 80 <= substantive_length(attestation.evidence)
+        <= MAX_REVIEW_EVIDENCE_CHARS
+        and not has_unresolved_marker(attestation.evidence)
+        and not contains_raw_html_markup(attestation.evidence)
+    )
 
 
 def normalize_coverage_identity(value: str) -> str:
@@ -2716,24 +3865,733 @@ def certification_json_object(
     root: Path,
     path: Path,
 ) -> tuple[dict[str, object] | None, str | None]:
-    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-        result: dict[str, object] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError(f"duplicate JSON key {key!r}")
-            result[key] = value
-        return result
+    return strict_json_object(root, path)
+
+
+def load_external_attestation_key(
+    root: Path,
+    raw_path: str | Path | None,
+) -> tuple[bytes | None, str | None, str | None]:
+    """Load one non-repository candidate-integrity HMAC key without following symlinks."""
+    if raw_path is None or not str(raw_path).strip():
+        return None, None, "an external attestation key file is required"
+    unresolved = Path(raw_path).expanduser()
+    if not unresolved.is_absolute():
+        return None, None, "attestation key path must be absolute"
+    if unresolved.is_symlink():
+        return None, None, "attestation key file may not be a symlink"
+    try:
+        resolved = unresolved.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        return None, None, f"attestation key path cannot be resolved safely: {exc}"
+    try:
+        resolved.relative_to(root.resolve())
+    except ValueError:
+        pass
+    else:
+        return None, None, "attestation key must be stored outside the repository"
 
     try:
-        payload = json.loads(
-            read_text_safe(root, path),
-            object_pairs_hook=unique_object,
+        before_open = os.lstat(resolved)
+    except OSError as exc:
+        return None, None, f"attestation key metadata could not be read: {exc}"
+    if not stat.S_ISREG(before_open.st_mode):
+        return None, None, "attestation key is not a regular file"
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    descriptor = -1
+    try:
+        descriptor = os.open(resolved, flags)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            return None, None, "attestation key is not a regular file"
+        if (
+            metadata.st_dev != before_open.st_dev
+            or metadata.st_ino != before_open.st_ino
+        ):
+            return None, None, "attestation key changed while it was being opened"
+        if metadata.st_nlink != 1:
+            return None, None, "attestation key must not have hard links"
+        if stat.S_IMODE(metadata.st_mode) & 0o077:
+            return None, None, "attestation key permissions must deny all group/world access"
+        chunks: list[bytes] = []
+        remaining = MAX_ATTESTATION_KEY_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        key = b"".join(chunks)
+        metadata_after = os.fstat(descriptor)
+        stable_before = (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_mode,
+            metadata.st_nlink,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
         )
-    except (ValueError, OSError, SafeRefusal) as exc:
-        return None, f"could not be read as safe JSON: {exc}"
-    if not isinstance(payload, dict):
-        return None, "must be a JSON object"
-    return payload, None
+        stable_after = (
+            metadata_after.st_dev,
+            metadata_after.st_ino,
+            metadata_after.st_mode,
+            metadata_after.st_nlink,
+            metadata_after.st_size,
+            metadata_after.st_mtime_ns,
+            metadata_after.st_ctime_ns,
+        )
+        if stable_after != stable_before or len(key) != metadata.st_size:
+            return None, None, "attestation key changed while it was being read"
+    except OSError as exc:
+        return None, None, f"attestation key could not be read safely: {exc}"
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if not MIN_ATTESTATION_KEY_BYTES <= len(key) <= MAX_ATTESTATION_KEY_BYTES:
+        return (
+            None,
+            None,
+            f"attestation key must contain {MIN_ATTESTATION_KEY_BYTES} to "
+            f"{MAX_ATTESTATION_KEY_BYTES} bytes",
+        )
+    return key, hashlib.sha256(key).hexdigest(), None
+
+
+def evidence_v2_signature(payload: dict[str, object], key: bytes) -> str:
+    """Return the domain-separated HMAC for an exact v2 evidence object."""
+    unsigned = {name: value for name, value in payload.items() if name != "signature"}
+    encoded = json.dumps(
+        unsigned,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hmac.new(key, EVIDENCE_HMAC_CONTEXT + encoded, hashlib.sha256).hexdigest()
+
+
+def terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
+    """Stop one bounded child and reap it without collecting more pipe output."""
+    def send_signal(sig: int) -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, sig)
+            elif sig == signal.SIGTERM:
+                process.terminate()
+            else:
+                process.kill()
+        except (OSError, ProcessLookupError):
+            pass
+
+    send_signal(signal.SIGTERM)
+    try:
+        process.wait(timeout=GIT_TERMINATION_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+    # Kill the process group even when the Git parent exited after SIGTERM: a
+    # transport/helper descendant may still hold either output pipe open.
+    if os.name == "posix":
+        send_signal(signal.SIGKILL)
+    else:
+        try:
+            process.kill()
+        except OSError:
+            pass
+    try:
+        process.wait(timeout=GIT_TERMINATION_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        # A killed process can remain uninterruptible in the kernel. Do not turn a
+        # bounded repository query into an unbounded wait.
+        return
+
+
+def bounded_process_output(
+    command: Sequence[str],
+    environment: dict[str, str],
+) -> tuple[int | None, bytes, bytes, str | None]:
+    """Run a child while retaining at most the configured bytes from each pipe."""
+    process_group_options: dict[str, object] = {}
+    if os.name == "posix":
+        process_group_options["start_new_session"] = True
+    elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+        process_group_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            **process_group_options,
+        )
+    except OSError as exc:
+        return None, b"", b"", f"bounded Git query failed: {exc}"
+    assert process.stdout is not None
+    assert process.stderr is not None
+
+    stdout_buffer = bytearray()
+    stderr_buffer = bytearray()
+    overflow: set[str] = set()
+    reader_errors: list[str] = []
+    state_lock = threading.Lock()
+    state_changed = threading.Event()
+
+    def drain(
+        name: str,
+        stream: object,
+        destination: bytearray,
+    ) -> None:
+        try:
+            descriptor = stream.fileno()  # type: ignore[attr-defined]
+            while True:
+                chunk = os.read(descriptor, 64 * 1024)
+                if not chunk:
+                    break
+                if len(destination) + len(chunk) > MAX_GIT_COMMAND_OUTPUT_BYTES:
+                    with state_lock:
+                        overflow.add(name)
+                    state_changed.set()
+                    break
+                destination.extend(chunk)
+        except OSError as exc:
+            with state_lock:
+                reader_errors.append(f"{name} pipe read failed: {exc}")
+        finally:
+            state_changed.set()
+
+    readers = [
+        threading.Thread(
+            target=drain,
+            args=("stdout", process.stdout, stdout_buffer),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=drain,
+            args=("stderr", process.stderr, stderr_buffer),
+            daemon=True,
+        ),
+    ]
+    for reader in readers:
+        reader.start()
+
+    deadline = time.monotonic() + GIT_COMMAND_TIMEOUT_SECONDS
+    failure: str | None = None
+    while True:
+        with state_lock:
+            has_overflow = bool(overflow)
+            pipe_issue = reader_errors[0] if reader_errors else None
+        if has_overflow:
+            failure = "Git query exceeded the bounded output budget"
+            terminate_and_reap(process)
+            break
+        if pipe_issue is not None:
+            failure = f"bounded Git query failed: {pipe_issue}"
+            terminate_and_reap(process)
+            break
+        if process.poll() is not None and not any(reader.is_alive() for reader in readers):
+            process.wait()
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            failure = (
+                f"bounded Git query exceeded the {GIT_COMMAND_TIMEOUT_SECONDS}-second timeout"
+            )
+            terminate_and_reap(process)
+            break
+        state_changed.wait(min(remaining, 0.05))
+        state_changed.clear()
+
+    join_deadline = time.monotonic() + GIT_TERMINATION_GRACE_SECONDS
+    for reader in readers:
+        reader.join(max(0.0, join_deadline - time.monotonic()))
+    if any(reader.is_alive() for reader in readers):
+        try:
+            process.stdout.close()
+        except OSError:
+            pass
+        try:
+            process.stderr.close()
+        except OSError:
+            pass
+        terminate_and_reap(process)
+        for reader in readers:
+            reader.join(GIT_TERMINATION_GRACE_SECONDS)
+    else:
+        process.stdout.close()
+        process.stderr.close()
+
+    with state_lock:
+        if overflow:
+            failure = "Git query exceeded the bounded output budget"
+        elif reader_errors and failure is None:
+            failure = f"bounded Git query failed: {reader_errors[0]}"
+    if failure is not None:
+        return None, b"", b"", failure
+    return process.returncode, bytes(stdout_buffer), bytes(stderr_buffer), None
+
+
+def readonly_git(
+    root: Path,
+    arguments: Sequence[str],
+) -> tuple[int | None, bytes, str | None]:
+    """Run one bounded, non-shell Git query with repository hooks disabled."""
+    executable = shutil.which("git")
+    if executable is None:
+        return None, b"", "Git executable is unavailable"
+    try:
+        executable_path = Path(executable).resolve(strict=True)
+        executable_path.relative_to(root.resolve())
+    except ValueError:
+        pass
+    except (OSError, RuntimeError) as exc:
+        return None, b"", f"Git executable cannot be resolved safely: {exc}"
+    else:
+        return None, b"", "Git executable may not come from inside the repository"
+
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("GIT_")
+    }
+    environment.update(
+        {
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_NO_LAZY_FETCH": "1",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_PAGER": "cat",
+            "GIT_TERMINAL_PROMPT": "0",
+            "LC_ALL": "C",
+        }
+    )
+    command = [
+        str(executable_path),
+        "--no-optional-locks",
+        "--no-replace-objects",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        f"core.hooksPath={os.devnull}",
+        "-c",
+        "diff.external=",
+        "-c",
+        "credential.helper=",
+        "-c",
+        "protocol.allow=never",
+        "-c",
+        "submodule.recurse=false",
+        "-C",
+        str(root),
+        *arguments,
+    ]
+    returncode, stdout, stderr, issue = bounded_process_output(command, environment)
+    if issue is not None:
+        return None, b"", issue
+    if returncode not in {0, 1}:
+        detail = stderr[:200].decode("utf-8", errors="backslashreplace")
+        return returncode, stdout, f"Git query failed: {detail!r}"
+    return returncode, stdout, None
+
+
+def repository_blob_oid(
+    root: Path,
+    relative: PurePosixPath,
+    algorithm: str,
+    remaining_bytes: int,
+    *,
+    expected_executable: bool,
+) -> tuple[str | None, int, str | None]:
+    """Hash one regular worktree file as a Git blob through no-follow descriptors."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    nonblock = getattr(os, "O_NONBLOCK", 0)
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    supports_openat = os.open in getattr(os, "supports_dir_fd", set()) and directory_flag
+    directory_fd: int | None = None
+    file_fd: int | None = None
+    if not supports_openat or not nofollow:
+        return (
+            None,
+            0,
+            "platform lacks descriptor-relative no-follow reads required for certification",
+        )
+    try:
+        directory_fd = os.open(
+            root, os.O_RDONLY | directory_flag | nofollow | cloexec
+        )
+        for part in relative.parts[:-1]:
+            next_fd = os.open(
+                part,
+                os.O_RDONLY | directory_flag | nofollow | cloexec,
+                dir_fd=directory_fd,
+            )
+            os.close(directory_fd)
+            directory_fd = next_fd
+        file_fd = os.open(
+            relative.parts[-1],
+            os.O_RDONLY | nofollow | cloexec | nonblock,
+            dir_fd=directory_fd,
+        )
+        metadata = os.fstat(file_fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            return None, 0, "tracked path is not a regular file"
+        if (
+            os.name != "nt"
+            and bool(stat.S_IMODE(metadata.st_mode) & 0o111) != expected_executable
+        ):
+            return None, 0, "tracked executable mode drifted"
+        if metadata.st_size > remaining_bytes:
+            return (
+                None,
+                0,
+                f"tracked bytes exceed the {MAX_CERTIFICATION_TRACKED_BYTES:,}-byte verification budget",
+            )
+        digest = hashlib.new(algorithm)
+        digest.update(f"blob {metadata.st_size}\0".encode("ascii"))
+        total = 0
+        while True:
+            chunk = os.read(file_fd, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > metadata.st_size or total > remaining_bytes:
+                return None, 0, "tracked file changed or exceeded the byte budget while hashing"
+            digest.update(chunk)
+        if total != metadata.st_size:
+            return None, 0, "tracked file changed while hashing"
+        metadata_after = os.fstat(file_fd)
+        stable_before = (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+            metadata.st_mode,
+        )
+        stable_after = (
+            metadata_after.st_dev,
+            metadata_after.st_ino,
+            metadata_after.st_size,
+            metadata_after.st_mtime_ns,
+            metadata_after.st_ctime_ns,
+            metadata_after.st_mode,
+        )
+        if stable_after != stable_before:
+            return None, 0, "tracked file changed while hashing"
+        return digest.hexdigest(), total, None
+    except (OSError, ValueError) as exc:
+        return None, 0, f"tracked file could not be hashed safely: {exc}"
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+def git_index_worktree_issue(root: Path) -> str | None:
+    """Compare every tracked worktree blob to the index and the index to HEAD."""
+    code, output, issue = readonly_git(root, ("ls-files", "-v", "-z"))
+    if issue is not None or code != 0:
+        return issue or "tracked-file flags could not be read"
+    flagged_entries = [item for item in output.split(b"\x00") if item]
+    if len(flagged_entries) > MAX_INDEX_ROWS:
+        return f"tracked-file count exceeds the {MAX_INDEX_ROWS:,}-file verification budget"
+    for entry in flagged_entries:
+        if not entry.startswith(b"H "):
+            return (
+                "tracked files may not use assume-unchanged, skip-worktree, "
+                "or other non-normal index flags"
+            )
+
+    code, output, issue = readonly_git(root, ("diff-index", "--cached", "--quiet", "HEAD", "--"))
+    if issue is not None:
+        return issue
+    if code != 0:
+        return "Git index does not exactly match HEAD"
+
+    code, output, issue = readonly_git(
+        root, ("ls-files", "--others", "--exclude-standard", "-z")
+    )
+    if issue is not None or code != 0:
+        return issue or "untracked files could not be enumerated"
+    if output:
+        return "Git worktree contains untracked non-ignored files"
+    code, output, issue = readonly_git(
+        root,
+        ("ls-files", "--others", "--ignored", "--exclude-standard", "-z"),
+    )
+    if issue is not None or code != 0:
+        return issue or "ignored untracked files could not be enumerated"
+    if output:
+        return "Git worktree contains ignored untracked files"
+
+    code, output, issue = readonly_git(root, ("ls-files", "-s", "-z"))
+    if issue is not None or code != 0:
+        return issue or "Git index entries could not be read"
+    entries = [item for item in output.split(b"\x00") if item]
+    if len(entries) > MAX_INDEX_ROWS:
+        return f"tracked-file count exceeds the {MAX_INDEX_ROWS:,}-file verification budget"
+    code, output, issue = readonly_git(root, ("rev-parse", "--show-object-format"))
+    if issue is not None or code != 0:
+        return issue or "Git object format could not be established"
+    try:
+        algorithm = output.decode("ascii").strip()
+    except UnicodeDecodeError:
+        return "Git object format is not ASCII"
+    if algorithm not in {"sha1", "sha256"}:
+        return f"unsupported Git object format: {algorithm!r}"
+    object_pattern = r"[0-9a-f]{40}" if algorithm == "sha1" else r"[0-9a-f]{64}"
+    seen_paths: set[str] = set()
+    total_tracked_bytes = 0
+    for entry in entries:
+        try:
+            metadata, raw_path = entry.split(b"\t", 1)
+            mode, expected_object, stage = metadata.decode("ascii").split()
+            path_text = raw_path.decode("utf-8")
+            relative = normalize_rel(path_text)
+        except (UnicodeDecodeError, ValueError, SafeRefusal):
+            return "Git index contains an unsafe or malformed tracked path"
+        if stage != "0":
+            return "Git index contains an unmerged entry"
+        normalized_path = relative.as_posix()
+        if normalized_path in seen_paths:
+            return "Git index contains duplicate tracked paths"
+        seen_paths.add(normalized_path)
+        if re.fullmatch(object_pattern, expected_object) is None:
+            return f"Git index object ID is malformed at {normalized_path}"
+        if mode == "120000":
+            return f"tracked symlinks are unsupported for certification: {normalized_path}"
+        if mode not in {"100644", "100755"}:
+            return f"unsupported tracked mode {mode} at {normalized_path}"
+
+        actual_object, file_bytes, hash_issue = repository_blob_oid(
+            root,
+            relative,
+            algorithm,
+            MAX_CERTIFICATION_TRACKED_BYTES - total_tracked_bytes,
+            expected_executable=mode == "100755",
+        )
+        if hash_issue is not None or actual_object is None:
+            return f"{hash_issue or 'tracked blob hash is unavailable'}: {normalized_path}"
+        total_tracked_bytes += file_bytes
+        if not hmac.compare_digest(actual_object.casefold(), expected_object.casefold()):
+            return f"tracked worktree bytes do not match the Git index: {normalized_path}"
+    return None
+
+
+def certification_overlay_paths(
+    root: Path,
+    certification_path: Path,
+    coverage_path: Path,
+    evidence_root: Path,
+    rows: Sequence[CoverageRow],
+    payload: dict[str, object],
+) -> tuple[set[str], list[str]]:
+    """Resolve the exact files permitted in the one-commit attestation overlay."""
+    paths = {
+        certification_path.relative_to(root).as_posix(),
+        coverage_path.relative_to(root).as_posix(),
+    }
+    issues: list[str] = []
+    for row in rows:
+        status, _ = parse_coverage_status(row.status_cell)
+        if status not in {"verified", "n/a"}:
+            continue
+        resolved_paths: set[Path] = set()
+        for destination in markdown_navigation_destinations(row.status_cell):
+            resolved, resolution_issue = resolve_markdown_link(
+                root, coverage_path, destination
+            )
+            if resolution_issue is not None or resolved is None:
+                issues.append(
+                    f"coverage row {row.line} has an unsafe evidence link: "
+                    f"{resolution_issue or 'unresolved link'}"
+                )
+                continue
+            try:
+                relative = resolved.relative_to(root)
+                target = safe_target(root, relative.as_posix())
+                target.relative_to(evidence_root)
+            except (ValueError, SafeRefusal) as exc:
+                issues.append(
+                    f"coverage row {row.line} evidence escapes evidence_root: {exc}"
+                )
+                continue
+            if target.suffix != ".json" or not target.is_file() or target.is_symlink():
+                issues.append(
+                    f"coverage row {row.line} evidence is not a regular .json file"
+                )
+                continue
+            resolved_paths.add(target)
+        if len(resolved_paths) != 1:
+            issues.append(
+                f"coverage row {row.line} must reference exactly one HMAC-consistent candidate record"
+            )
+        for target in resolved_paths:
+            paths.add(target.relative_to(root).as_posix())
+
+    named_paths: list[object] = []
+    project_gate = payload.get("project_native_gate")
+    if isinstance(project_gate, dict):
+        named_paths.append(project_gate.get("evidence"))
+    maintenance = payload.get("maintenance")
+    if isinstance(maintenance, dict):
+        named_paths.append(maintenance.get("evidence"))
+    authority = payload.get("production_authority")
+    if isinstance(authority, dict):
+        named_paths.extend(
+            (
+                authority.get("approval_evidence"),
+                authority.get("rollback_evidence"),
+            )
+        )
+    for raw_path in named_paths:
+        target, issue = certification_evidence_target(root, evidence_root, raw_path)
+        if issue is not None or target is None or target.suffix != ".json":
+            issues.append(
+                f"named evidence path is unsafe: {issue or 'file must use .json'}"
+            )
+            continue
+        paths.add(target.relative_to(root).as_posix())
+    return paths, issues
+
+
+def exact_git_commit_issue(root: Path, label: str, object_id: str) -> str | None:
+    """Reject missing, non-commit, and oversized exact Git objects before peeling."""
+    code, output, issue = readonly_git(root, ("cat-file", "-t", object_id))
+    if issue is not None or code != 0:
+        return issue or f"{label} commit object does not exist"
+    if output != b"commit\n":
+        return f"{label} object is not exactly a commit"
+
+    code, output, issue = readonly_git(root, ("cat-file", "-s", object_id))
+    if issue is not None or code != 0:
+        return issue or f"{label} commit object size is unavailable"
+    try:
+        size_text = output.decode("ascii").strip()
+    except UnicodeDecodeError:
+        return f"{label} commit object size is not ASCII"
+    if re.fullmatch(r"(?:0|[1-9][0-9]*)", size_text) is None:
+        return f"{label} commit object size is malformed"
+    object_size = int(size_text)
+    if object_size > MAX_CERTIFICATION_COMMIT_OBJECT_BYTES:
+        return (
+            f"{label} commit object exceeds the "
+            f"{MAX_CERTIFICATION_COMMIT_OBJECT_BYTES:,}-byte verification budget"
+        )
+    return None
+
+
+def git_attestation_issue(
+    root: Path,
+    *,
+    source_commit: str,
+    attestation_commit: str,
+    allowed_overlay_paths: set[str],
+) -> str | None:
+    """Verify a clean direct-child attestation commit and its exact changed paths."""
+    commit_pattern = r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})"
+    if re.fullmatch(commit_pattern, source_commit) is None:
+        return "certification source commit is not a full object ID"
+    if re.fullmatch(commit_pattern, attestation_commit) is None:
+        return "trusted attestation commit is not a full object ID"
+
+    code, output, issue = readonly_git(root, ("rev-parse", "--show-toplevel"))
+    if issue is not None or code != 0:
+        return issue or "repository root is not a Git worktree"
+    try:
+        top_level = Path(output.decode("utf-8").strip()).resolve(strict=True)
+    except (UnicodeDecodeError, OSError, RuntimeError):
+        return "Git worktree root could not be decoded and resolved safely"
+    if top_level != root.resolve():
+        return "certification root is not the Git worktree top level"
+
+    for label, value in (
+        ("attestation", attestation_commit),
+        ("source", source_commit),
+    ):
+        commit_issue = exact_git_commit_issue(root, label, value)
+        if commit_issue is not None:
+            return commit_issue
+
+    code, output, issue = readonly_git(
+        root, ("rev-parse", "--verify", "--end-of-options", "HEAD")
+    )
+    if issue is not None or code != 0:
+        return issue or "HEAD commit does not exist"
+    try:
+        head_commit = output.decode("ascii").strip()
+    except UnicodeDecodeError:
+        return "HEAD commit ID is not ASCII"
+    if re.fullmatch(commit_pattern, head_commit) is None:
+        return "HEAD did not resolve to a full object ID"
+    if head_commit.casefold() != attestation_commit.casefold():
+        return "trusted attestation commit is not the current HEAD"
+
+    index_worktree_issue = git_index_worktree_issue(root)
+    if index_worktree_issue is not None:
+        return index_worktree_issue
+
+    code, output, issue = readonly_git(
+        root,
+        ("rev-list", "--parents", "--max-count=1", attestation_commit),
+    )
+    if issue is not None or code != 0:
+        return issue or "attestation parent could not be read"
+    try:
+        parent_line = output.decode("ascii").strip()
+    except UnicodeDecodeError:
+        return "attestation parent list is not ASCII"
+    parent_fields = parent_line.split()
+    if (
+        len(parent_fields) != 2
+        or parent_fields[0].casefold() != attestation_commit.casefold()
+        or parent_fields[1].casefold() != source_commit.casefold()
+    ):
+        return "attestation commit must be the direct, single-parent child of the source commit"
+
+    code, output, issue = readonly_git(
+        root,
+        (
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "--no-renames",
+            "-r",
+            "-z",
+            source_commit,
+            attestation_commit,
+            "--",
+        ),
+    )
+    if issue is not None or code != 0:
+        return issue or "attestation overlay paths could not be read"
+    try:
+        raw_paths = [
+            item.decode("utf-8")
+            for item in output.split(b"\x00")
+            if item
+        ]
+        changed_paths = {normalize_rel(item).as_posix() for item in raw_paths}
+    except (UnicodeDecodeError, SafeRefusal) as exc:
+        return f"attestation overlay contains an unsafe path: {exc}"
+    if changed_paths != allowed_overlay_paths:
+        unexpected = sorted(changed_paths - allowed_overlay_paths)
+        missing = sorted(allowed_overlay_paths - changed_paths)
+        return (
+            "attestation overlay paths do not exactly match the candidate manifest, "
+            "coverage, and HMAC-consistent candidate records "
+            f"(unexpected={unexpected[:5]}, missing={missing[:5]})"
+        )
+    return None
 
 
 def certification_evidence_target(
@@ -2760,6 +4618,10 @@ def evidence_record_issue(
     root: Path,
     path: Path,
     *,
+    attestation_key: bytes,
+    attestation_key_id: str,
+    expected_repository_identity: str,
+    expected_deployment_target_id: str,
     expected_capability: str,
     expected_status: str,
     expected_commit: str,
@@ -2775,6 +4637,8 @@ def evidence_record_issue(
     required_keys = {
         "schema_version",
         "repository_commit",
+        "repository_identity",
+        "deployment_target_id",
         "capabilities",
         "environment",
         "command",
@@ -2782,21 +4646,56 @@ def evidence_record_issue(
         "observed_at",
         "result",
         "artifacts",
+        "issuer",
+        "key_id",
+        "signature",
     }
+    schema_version = payload.get("schema_version")
+    if type(schema_version) is not int or schema_version != 2:
+        if schema_version == 1:
+            return "v1 evidence is never valid for candidate-integrity validation"
+        return "evidence record schema_version must be the exact integer 2"
     if set(payload) != required_keys:
-        return "evidence record keys do not exactly match the v1 schema"
-    if payload.get("schema_version") != 1:
-        return "evidence record schema_version is not 1"
+        return "evidence record keys do not exactly match the HMAC-consistent v2 candidate schema"
+    issuer = payload.get("issuer")
+    if not substantive_certification_string(issuer, 3):
+        return "evidence record issuer is missing or non-substantive"
+    key_id = payload.get("key_id")
+    if type(key_id) is not str or key_id != attestation_key_id:
+        return "evidence record key_id does not match the candidate-integrity key"
+    signature = payload.get("signature")
+    if (
+        type(signature) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", signature) is None
+    ):
+        return "evidence record signature is not a lowercase HMAC-SHA256 digest"
+    try:
+        expected_signature = evidence_v2_signature(payload, attestation_key)
+    except (TypeError, ValueError, UnicodeEncodeError):
+        return "candidate record cannot be canonicalized safely for HMAC verification"
+    if not hmac.compare_digest(signature, expected_signature):
+        return "candidate record HMAC-SHA256 integrity check failed"
+    if payload.get("repository_identity") != expected_repository_identity:
+        return "evidence record repository_identity does not match the manifest"
+    if payload.get("deployment_target_id") != expected_deployment_target_id:
+        return "evidence record deployment_target_id does not match the manifest"
     commit = payload.get("repository_commit")
-    if not isinstance(commit, str) or commit.casefold() != expected_commit.casefold():
-        return "evidence record is not bound to the certified commit"
+    if (
+        type(commit) is not str
+        or re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", commit) is None
+        or commit.casefold() != expected_commit.casefold()
+    ):
+        return "candidate record is not bound to the inspected source commit"
     capabilities = payload.get("capabilities")
-    if not isinstance(capabilities, list) or not capabilities:
-        return "evidence record capabilities must be a non-empty array"
+    if (
+        type(capabilities) is not list
+        or not capabilities
+        or not all(type(value) is str and bool(value.strip()) for value in capabilities)
+    ):
+        return "evidence record capabilities must contain only non-empty strings"
     normalized_capabilities = {
         normalize_coverage_identity(value)
         for value in capabilities
-        if isinstance(value, str)
     }
     if normalize_coverage_identity(expected_capability) not in normalized_capabilities:
         return "evidence record does not name the covered capability"
@@ -2813,7 +4712,7 @@ def evidence_record_issue(
     if not substantive_certification_string(command):
         return "evidence record command or review procedure is missing"
     if expected_command is not None and command != expected_command:
-        return "evidence record command does not match the certification manifest"
+        return "candidate record command does not match the candidate manifest"
     observed_at = parse_certification_instant(payload.get("observed_at"))
     if observed_at is None:
         return "evidence record observed_at is not a UTC RFC3339 instant"
@@ -2821,16 +4720,18 @@ def evidence_record_issue(
     if age_seconds < 0:
         return "evidence record observed_at is in the future"
     if observed_at > not_after:
-        return "evidence record was observed after the certificate was issued"
+        return "candidate record was observed after the candidate manifest was issued"
     if age_seconds > max_age_hours * 3600:
-        return "evidence record is older than the certification freshness window"
+        return "candidate record is older than the candidate-integrity freshness window"
     result = payload.get("result")
     exit_code = payload.get("exit_code")
     expected_result = "passed" if expected_status == "verified" else "not-applicable"
     if result != expected_result:
         return f"evidence record result must be {expected_result}"
-    if expected_status == "verified" and exit_code != 0:
-        return "verified evidence must record exit_code 0"
+    if expected_status == "verified" and (
+        type(exit_code) is not int or exit_code != 0
+    ):
+        return "verified evidence must record the exact integer exit_code 0"
     if expected_status == "n/a" and exit_code is not None:
         return "not-applicable evidence must record a null exit_code"
     artifacts = payload.get("artifacts")
@@ -2849,6 +4750,10 @@ def linked_certification_evidence(
     evidence_root: Path,
     row: CoverageRow,
     *,
+    attestation_key: bytes,
+    attestation_key_id: str,
+    expected_repository_identity: str,
+    expected_deployment_target_id: str,
     status: str,
     expected_commit: str,
     now: datetime,
@@ -2875,6 +4780,10 @@ def linked_certification_evidence(
         issue = evidence_record_issue(
             root,
             target,
+            attestation_key=attestation_key,
+            attestation_key_id=attestation_key_id,
+            expected_repository_identity=expected_repository_identity,
+            expected_deployment_target_id=expected_deployment_target_id,
             expected_capability=row.identity,
             expected_status=status,
             expected_commit=expected_commit,
@@ -2897,6 +4806,10 @@ def validate_named_certification_evidence(
     evidence_root: Path,
     raw_path: object,
     *,
+    attestation_key: bytes,
+    attestation_key_id: str,
+    expected_repository_identity: str,
+    expected_deployment_target_id: str,
     label: str,
     capability: str,
     expected_commit: str,
@@ -2911,6 +4824,10 @@ def validate_named_certification_evidence(
         issue = evidence_record_issue(
             root,
             target,
+            attestation_key=attestation_key,
+            attestation_key_id=attestation_key_id,
+            expected_repository_identity=expected_repository_identity,
+            expected_deployment_target_id=expected_deployment_target_id,
             expected_capability=capability,
             expected_status="verified",
             expected_commit=expected_commit,
@@ -2926,7 +4843,7 @@ def validate_named_certification_evidence(
             "error",
             str(raw_path) if isinstance(raw_path, str) else CERTIFICATION_REL,
             f"{label} evidence is invalid: {issue}.",
-            "Record a fresh v1 evidence JSON file inside evidence_root and bind it to the certified commit.",
+            "Record a fresh HMAC-consistent v2 candidate JSON file inside evidence_root and bind it to the inspected source commit.",
         )
 
 
@@ -2938,6 +4855,7 @@ def validate_certification(
     expected_commit: str,
     *,
     now: datetime | None = None,
+    attestation_key_file: str | Path | None = None,
 ) -> None:
     root = resolve_safe_directory(root)
     now = now or datetime.now(timezone.utc)
@@ -2948,8 +4866,8 @@ def validate_certification(
             "CERT001",
             "error",
             rel,
-            "Production certification manifest is missing or unsafe.",
-            "Create and tailor the configured v1 certification manifest before making a production-ready claim.",
+            "Candidate-integrity manifest is missing or unsafe.",
+            "Create and tailor the configured HMAC-consistent v2 candidate manifest; it cannot establish production authority.",
         )
         return
     payload, issue = certification_json_object(root, certification_path)
@@ -2958,8 +4876,8 @@ def validate_certification(
             "CERT001",
             "error",
             rel,
-            f"Production certification manifest {issue}.",
-            "Restore a regular UTF-8 JSON v1 manifest.",
+            f"Candidate-integrity manifest {issue}.",
+            "Restore a regular UTF-8 JSON v2 manifest.",
         )
         return
     required_keys = {
@@ -2967,6 +4885,8 @@ def validate_certification(
         "claim",
         "profile",
         "repository_commit",
+        "repository_identity",
+        "deployment_target_id",
         "environment",
         "issued_at",
         "expires_at",
@@ -2976,43 +4896,90 @@ def validate_certification(
         "maintenance",
         "production_authority",
     }
-    if set(payload) != required_keys or payload.get("schema_version") != 1:
+    schema_version = payload.get("schema_version")
+    if (
+        set(payload) != required_keys
+        or type(schema_version) is not int
+        or schema_version != 2
+    ):
+        version_detail = (
+            " Legacy v1 manifests can never establish candidate integrity or production readiness."
+            if schema_version == 1
+            else ""
+        )
         report.add(
             "CERT002",
             "error",
             rel,
-            "Certification manifest does not exactly match the v1 top-level schema.",
-            "Keep every required v1 field once and remove unknown top-level fields.",
+            "Candidate-integrity manifest does not exactly match the HMAC-consistent v2 "
+            f"top-level schema.{version_detail}",
+            "Keep every required v2 field once and remove unknown top-level fields.",
         )
         return
-    if payload.get("claim") != "production-ready":
+    if payload.get("claim") != "candidate-only":
         report.add(
             "CERT003",
             "error",
             rel,
-            "Certification claim is not production-ready.",
-            "Use candidate-only until every certification gate has fresh evidence.",
+            "Bundled certification manifest claim must be candidate-only.",
+            "A production-ready claim is forbidden until a provider-specific external authority verifier is integrated.",
         )
     if payload.get("profile") != profile:
         report.add(
             "CERT003",
             "error",
             rel,
-            "Certification profile does not match the invoked profile.",
+            "Candidate-integrity profile does not match the invoked profile.",
             "Run the declared profile or update and re-evidence the manifest deliberately.",
         )
+    repository_identity = payload.get("repository_identity")
+    deployment_target_id = payload.get("deployment_target_id")
+    if (
+        not substantive_certification_string(repository_identity, 8)
+        or not isinstance(repository_identity, str)
+        or len(repository_identity) > 512
+        or repository_identity.casefold() in {"default", "repository", "unknown"}
+        or not substantive_certification_string(deployment_target_id, 8)
+        or not isinstance(deployment_target_id, str)
+        or len(deployment_target_id) > 512
+        or deployment_target_id.casefold()
+        in {"default", "production", "prod", "unknown"}
+    ):
+        report.add(
+            "CERT013",
+            "error",
+            rel,
+            "Candidate-integrity manifest lacks a concrete repository identity or deployment target ID.",
+            "Record stable repository and deployment-target identifiers in the manifest and every HMAC-consistent candidate record; these caller-supplied values do not authenticate production authority.",
+        )
+        return
     commit = payload.get("repository_commit")
     if (
-        not isinstance(commit, str)
+        type(commit) is not str
         or re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", commit) is None
-        or commit.casefold() != expected_commit.casefold()
     ):
         report.add(
             "CERT004",
             "error",
             rel,
-            "Certification is not bound to the trusted current commit assertion.",
-            "Pass the trusted CI commit to --commit and regenerate all evidence for that exact revision.",
+            "Candidate-integrity manifest is not bound to a full source commit object ID.",
+            "Record the source commit that directly precedes the candidate attestation overlay.",
+        )
+        return
+    attestation_key, attestation_key_id, key_issue = load_external_attestation_key(
+        root, attestation_key_file
+    )
+    if (
+        key_issue is not None
+        or attestation_key is None
+        or attestation_key_id is None
+    ):
+        report.add(
+            "CERT012",
+            "error",
+            rel,
+            f"Candidate-integrity HMAC key is invalid: {key_issue}.",
+            "Supply an absolute, non-symlinked, owner-only key file outside the repository.",
         )
         return
     if payload.get("environment") != "production":
@@ -3020,8 +4987,8 @@ def validate_certification(
             "CERT003",
             "error",
             rel,
-            "A production-ready certificate must target the production environment.",
-            "Keep local or staging evidence scoped to its literal label; certify production separately.",
+            "A candidate manifest for a requested production-readiness assessment must target the production environment.",
+            "Keep local or staging records scoped to their literal label; a production-scoped candidate assessment still ends with CERT015.",
         )
     issued_at = parse_certification_instant(payload.get("issued_at"))
     expires_at = parse_certification_instant(payload.get("expires_at"))
@@ -3036,8 +5003,8 @@ def validate_certification(
             "CERT005",
             "error",
             rel,
-            "Certification timestamps are invalid, future-issued, or expired.",
-            "Use UTC RFC3339 instants and issue a fresh bounded certificate after rerunning evidence.",
+            "Candidate-manifest timestamps are invalid, future-issued, or expired.",
+            "Use UTC RFC3339 instants and issue a fresh bounded candidate manifest after rerunning the declared checks.",
         )
 
     maintenance = payload.get("maintenance")
@@ -3048,7 +5015,7 @@ def validate_certification(
             "CERT006",
             "error",
             rel,
-            "Maintenance contract does not exactly match the v1 schema.",
+            "Maintenance contract does not exactly match the HMAC-consistent v2 candidate schema.",
             "Declare command, pull-request/push/schedule triggers, max_age_hours, and evidence.",
         )
     else:
@@ -3059,7 +5026,7 @@ def validate_certification(
                 "error",
                 rel,
                 f"Maintenance max_age_hours must be between 1 and {MAX_CERTIFICATION_AGE_HOURS}.",
-                "Choose a bounded freshness window and schedule re-certification within it.",
+                "Choose a bounded freshness window and schedule candidate-integrity revalidation within it.",
             )
         else:
             max_age_hours = raw_age
@@ -3068,8 +5035,8 @@ def validate_certification(
                     "CERT005",
                     "error",
                     rel,
-                    "Certification lifetime exceeds the declared maintenance freshness window.",
-                    "Expire the certificate no later than max_age_hours after issuance.",
+                    "Candidate-manifest lifetime exceeds the declared maintenance freshness window.",
+                    "Expire the candidate manifest no later than max_age_hours after issuance.",
                 )
         triggers = maintenance.get("triggers")
         if not isinstance(triggers, list) or not {"pull_request", "push", "schedule"}.issubset(
@@ -3088,7 +5055,7 @@ def validate_certification(
                 "error",
                 rel,
                 "Maintenance command is missing or unresolved.",
-                "Record the exact repository-native convergence or certification command.",
+                "Record the exact repository-native convergence or candidate-integrity command.",
             )
 
     evidence_root_value = payload.get("evidence_root")
@@ -3118,7 +5085,7 @@ def validate_certification(
             "error",
             relative_display(root, coverage_path),
             "Configured coverage matrix is missing or unsafe.",
-            "Restore the complete canonical inventory before certifying production readiness.",
+            "Restore the complete canonical inventory before evaluating the production-readiness blocker.",
         )
         return
     try:
@@ -3130,7 +5097,7 @@ def validate_certification(
             "error",
             relative_display(root, coverage_path),
             f"Coverage matrix cannot be bound safely: {exc}.",
-            "Restore a regular UTF-8 matrix and rerun certification.",
+            "Restore a regular UTF-8 matrix and rerun candidate-integrity validation.",
         )
         return
     digest = payload.get("coverage_sha256")
@@ -3141,9 +5108,46 @@ def validate_certification(
             "error",
             rel,
             "coverage_sha256 does not match the configured coverage matrix.",
-            "Rerun every affected capability and bind the certificate to the current matrix digest.",
+            "Rerun every affected capability and bind the candidate manifest to the current matrix digest.",
         )
     rows, _, _, _ = coverage_table_rows(coverage_text)
+    validate_coverage(
+        report,
+        root,
+        coverage_path,
+        require_canonical_rows=True,
+    )
+    allowed_overlay_paths, overlay_issues = certification_overlay_paths(
+        root,
+        certification_path,
+        coverage_path,
+        evidence_root,
+        rows,
+        payload,
+    )
+    if overlay_issues:
+        report.add(
+            "CERT014",
+            "error",
+            rel,
+            "Attestation overlay references are not exact: "
+            + "; ".join(overlay_issues[:3]),
+            "Use one regular HMAC-consistent v2 candidate JSON record per coverage row and only the named gate/authority candidate records.",
+        )
+    git_issue = git_attestation_issue(
+        root,
+        source_commit=commit,
+        attestation_commit=expected_commit,
+        allowed_overlay_paths=allowed_overlay_paths,
+    )
+    if git_issue is not None:
+        report.add(
+            "CERT014",
+            "error",
+            rel,
+            f"Git source/attestation binding is invalid: {git_issue}.",
+            "Commit all source changes, then add one direct-child attestation commit containing exactly the candidate manifest, coverage, and referenced HMAC-consistent candidate records.",
+        )
     production_identity = normalize_coverage_identity(
         "Release, deployment, and production actions require repository-local authority"
     )
@@ -3167,6 +5171,10 @@ def validate_certification(
             coverage_path,
             evidence_root,
             row,
+            attestation_key=attestation_key,
+            attestation_key_id=attestation_key_id,
+            expected_repository_identity=repository_identity,
+            expected_deployment_target_id=deployment_target_id,
             status=status,
             expected_commit=commit,
             now=now,
@@ -3180,7 +5188,7 @@ def validate_certification(
                 "error",
                 relative_display(root, coverage_path),
                 f"Coverage row {row.line} has no valid fresh commit-bound evidence: {'; '.join(issues[:3])}.",
-                "Link its status cell to a matching v1 evidence record inside evidence_root.",
+                "Link its status cell to one matching HMAC-consistent v2 candidate record inside evidence_root.",
             )
 
     project_gate = payload.get("project_native_gate")
@@ -3199,6 +5207,10 @@ def validate_certification(
             root,
             evidence_root,
             project_gate.get("evidence"),
+            attestation_key=attestation_key,
+            attestation_key_id=attestation_key_id,
+            expected_repository_identity=repository_identity,
+            expected_deployment_target_id=deployment_target_id,
             label="Project-native gate",
             capability=PROJECT_GATE_CAPABILITY,
             expected_commit=commit,
@@ -3213,6 +5225,10 @@ def validate_certification(
             root,
             evidence_root,
             maintenance.get("evidence"),
+            attestation_key=attestation_key,
+            attestation_key_id=attestation_key_id,
+            expected_repository_identity=repository_identity,
+            expected_deployment_target_id=deployment_target_id,
             label="Continuous maintenance",
             capability=MAINTENANCE_CAPABILITY,
             expected_commit=commit,
@@ -3224,7 +5240,12 @@ def validate_certification(
 
     authority = payload.get("production_authority")
     authority_keys = {"owner", "approval_evidence", "rollback_evidence"}
-    if not isinstance(authority, dict) or set(authority) != authority_keys or not is_substantive_owner(str(authority.get("owner", ""))):
+    if (
+        not isinstance(authority, dict)
+        or set(authority) != authority_keys
+        or not isinstance(authority.get("owner"), str)
+        or not is_substantive_owner(authority["owner"])
+    ):
         report.add(
             "CERT011",
             "error",
@@ -3238,6 +5259,10 @@ def validate_certification(
             root,
             evidence_root,
             authority.get("approval_evidence"),
+            attestation_key=attestation_key,
+            attestation_key_id=attestation_key_id,
+            expected_repository_identity=repository_identity,
+            expected_deployment_target_id=deployment_target_id,
             label="Production approval",
             capability=PRODUCTION_APPROVAL_CAPABILITY,
             expected_commit=commit,
@@ -3251,6 +5276,10 @@ def validate_certification(
             root,
             evidence_root,
             authority.get("rollback_evidence"),
+            attestation_key=attestation_key,
+            attestation_key_id=attestation_key_id,
+            expected_repository_identity=repository_identity,
+            expected_deployment_target_id=deployment_target_id,
             label="Production rollback",
             capability=PRODUCTION_ROLLBACK_CAPABILITY,
             expected_commit=commit,
@@ -3259,19 +5288,38 @@ def validate_certification(
             max_age_hours=max_age_hours,
             required_environment="production",
         )
+    report.add(
+        "CERT015",
+        "error",
+        rel,
+        "External production authority verifier is unavailable; local HMAC records prove candidate integrity only.",
+        "Keep the claim candidate-only until a provider-specific, pre-provisioned asymmetric verifier independently validates repository identity, deployment target, approval, and rollback authority.",
+    )
 
 
-def certify_repository(root: Path, profile: str, expected_commit: str) -> Report:
+def certify_repository(
+    root: Path,
+    profile: str,
+    expected_commit: str,
+    attestation_key_file: str | Path | None,
+) -> Report:
     report = audit_repository(root, profile, "certify")
     authorities = load_authorities(root, report)
-    validate_certification(report, root, authorities, profile, expected_commit)
+    validate_certification(
+        report,
+        root,
+        authorities,
+        profile,
+        expected_commit,
+        attestation_key_file=attestation_key_file,
+    )
     if not any(item.severity in {"error", "warning"} for item in report.findings):
         report.add(
-            "CERT000",
-            "info",
+            "CERT015",
+            "error",
             authorities["certification"],
-            "Production-ready certification is current for the asserted commit and bounded freshness window.",
-            "Keep project-native pull-request, push, and scheduled maintenance gates active; any drift requires re-certification.",
+            "External production authority verifier is unavailable; local validation cannot issue a production-ready result.",
+            "Provision and integrate a provider-specific asymmetric production authority verifier before enabling certification success.",
         )
     return report.normalized()
 
@@ -3619,7 +5667,8 @@ def validate_plan_semantics(
     container_source = mask_explicit_blockquote_lines(text)
     container_source = normalize_list_container_indentation(container_source)
     container_source = mask_explicit_blockquote_lines(container_source)
-    container_structural = mask_markdown_code(container_source)
+    container_structural_value = mask_markdown_code(container_source)
+    container_structural, _ = markdown_parts(container_structural_value)
     container_h1: list[str] = []
     container_h2: list[str] = []
     for line in markdown_source_lines(container_structural):
@@ -3787,13 +5836,13 @@ def validate_plan_semantics(
                 "Revision History contains no entries or at least one malformed entry.",
                 "Make every revision a list item with a valid UTC timestamp, Change:, and Reason:.",
             )
-        if not semantic_review_attestation_is_valid(revision):
+        if not semantic_review_attestation_is_valid(text):
             report.add(
                 "PLAN016",
                 "error",
                 rel,
                 "Completion has no valid persistent semantic-review attestation.",
-                "Add an indented Revision History continuation using Semantic-Review: reviewer=<role-or-team>; reviewed-at=<YYYY-MM-DD HH:MMZ>; evidence=<substantive observed review evidence>.",
+                "Add one visible indented continuation to the final Revision History entry using Semantic-Review: reviewer=<role-or-team>; reviewed-at=<YYYY-MM-DD HH:MMZ>; content-sha256=<digest after removing this entire line, including its line ending>; evidence=<substantive observed review evidence>.",
             )
         if not semantic_review:
             report.add(
@@ -4174,6 +6223,7 @@ def validate_authority_reachability(
     reachable: set[Path] = {entry.resolve(strict=False)}
     visited: set[Path] = set()
     queue = deque([entry])
+    routed_bytes = 0
     while queue and len(visited) < 5000:
         source = queue.popleft().resolve(strict=False)
         if source in visited:
@@ -4186,6 +6236,17 @@ def validate_authority_reachability(
                 text = read_text_safe(root, source)
         except (OSError, SafeRefusal):
             continue
+        routed_bytes += len(text.encode("utf-8"))
+        if routed_bytes > MAX_ROUTED_DOCUMENT_BYTES:
+            report.add(
+                "ROUTE003",
+                "error",
+                entry_rel,
+                f"Authority routing exceeded the {MAX_ROUTED_DOCUMENT_BYTES:,}-byte aggregate document budget.",
+                "Reduce broad documentation routing and keep the reachable authority map within the aggregate byte budget.",
+            )
+            queue.clear()
+            break
         for raw in markdown_navigation_destinations(text):
             target, error = resolve_markdown_link(root, source, raw)
             if error or target is None:
@@ -4561,7 +6622,7 @@ def scaffold_preview(root: Path, profile: str) -> Report:
                 "Target collides with a non-file path.",
                 "Resolve the collision before applying a template.",
             )
-        report.actions.append(
+        report.add_action(
             {"action": "preserve" if target.is_file() else "would-create", "path": rel}
         )
     for rel in MANAGED_DIRS:
@@ -4574,7 +6635,7 @@ def scaffold_preview(root: Path, profile: str) -> Report:
                 "Lifecycle target collides with a non-directory or symlink.",
                 "Resolve the collision before creating the lifecycle directory.",
             )
-        report.actions.append(
+        report.add_action(
             {"action": "preserve-dir" if target.is_dir() else "would-create-dir", "path": rel}
         )
     if profile == "full":
@@ -4587,7 +6648,7 @@ def scaffold_preview(root: Path, profile: str) -> Report:
                 "The full-profile navigation fragment is missing.",
                 "Repair the skill package before applying the full profile.",
             )
-        report.actions.append({"action": "would-merge", "path": "docs/index.md"})
+        report.add_action({"action": "would-merge", "path": "docs/index.md"})
     return report.normalized()
 
 
@@ -4637,6 +6698,29 @@ def validate_plan_command(
     return report.normalized()
 
 
+def terminal_safe(value: object) -> str:
+    """Render untrusted report fields without emitting terminal control bytes."""
+    output: list[str] = []
+    for character in str(value):
+        codepoint = ord(character)
+        if character == "\n":
+            output.append(r"\n")
+        elif character == "\r":
+            output.append(r"\r")
+        elif character == "\t":
+            output.append(r"\t")
+        elif unicodedata.category(character) in {"Cc", "Cf", "Cs", "Zl", "Zp"}:
+            if codepoint <= 0xFF:
+                output.append(f"\\x{codepoint:02x}")
+            elif codepoint <= 0xFFFF:
+                output.append(f"\\u{codepoint:04x}")
+            else:
+                output.append(f"\\U{codepoint:08x}")
+        else:
+            output.append(character)
+    return "".join(output)
+
+
 def print_report(report: Report, output_format: str) -> None:
     report.normalized()
     if output_format == "json":
@@ -4644,14 +6728,19 @@ def print_report(report: Report, output_format: str) -> None:
         return
     summary = report.summary()
     print(
-        f"{report.command}: {summary['errors']} error(s), "
+        f"{terminal_safe(report.command)}: {summary['errors']} error(s), "
         f"{summary['warnings']} warning(s), {summary['info']} info item(s)"
     )
     for item in report.findings:
-        print(f"[{item.severity}] {item.id} {item.path}: {item.message}")
-        print(f"  Remedy: {item.remediation}")
+        print(
+            f"[{terminal_safe(item.severity)}] {terminal_safe(item.id)} "
+            f"{terminal_safe(item.path)}: {terminal_safe(item.message)}"
+        )
+        print(f"  Remedy: {terminal_safe(item.remediation)}")
     for action in report.actions:
-        print(f"[{action['action']}] {action['path']}")
+        print(
+            f"[{terminal_safe(action['action'])}] {terminal_safe(action['path'])}"
+        )
 
 
 def add_root_options(
@@ -4689,13 +6778,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     certify = subparsers.add_parser(
         "certify",
-        help="Fail-closed production-readiness validation bound to a trusted commit",
+        help="Candidate-integrity validation that always fails closed with CERT015 without an external production-authority verifier",
     )
     add_root_options(certify)
     certify.add_argument(
         "--commit",
         required=True,
-        help="Trusted current Git commit from the invoking CI or source-control context",
+        help="Trusted current attestation commit from the invoking CI or source-control context",
+    )
+    certify.add_argument(
+        "--attestation-key-file",
+        default=None,
+        help="Absolute owner-only HMAC key outside the repository, required only for candidate checks and never production authority",
     )
 
     scaffold = subparsers.add_parser(
@@ -4765,7 +6859,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 1
             return 0
         if args.command == "certify":
-            report = certify_repository(root, args.profile, args.commit)
+            report = certify_repository(
+                root,
+                args.profile,
+                args.commit,
+                args.attestation_key_file,
+            )
             print_report(report, args.format)
             summary = report.summary()
             return 1 if summary["errors"] or summary["warnings"] else 0

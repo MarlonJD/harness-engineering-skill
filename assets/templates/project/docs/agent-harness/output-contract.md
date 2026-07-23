@@ -19,7 +19,7 @@ Use this contract for implementation handoffs. More local or risk-specific instr
 | `blocked` | A named condition prevented required progress or verification. |
 | `candidate-only` | The change or command is plausible but lacks required evidence. |
 | `release pending` | Local work is complete, but release or deployment evidence does not exist. |
-| `production-ready` | The non-expired commit-bound certification, every coverage row, the project-native gate, production authority, and rollback evidence all pass; do not infer this from installation or local checks. |
+| `production-ready` | Unavailable from the bundled verifier, which always returns nonzero `CERT015` after candidate checks. A future verifier may use this label only after independently authenticated repository and deployment-target identity, source/direct-child attestation commits, every coverage row, the project-native gate, production approval, rollback authority, artifact provenance, freshness, and revocation all pass. Never infer it from installation, templates, local checks, an arbitrary HMAC key, or self-asserted artifacts. |
 
 ## Handoff shape
 

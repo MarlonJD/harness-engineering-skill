@@ -64,7 +64,7 @@ Not completed. Compare the final result with the purpose, list gaps, and record 
 
 ## Revision History
 
-<!-- Before adding an entry, propagate the revision through every affected section so the plan remains internally consistent. Before completion, append an indented continuation to the final entry using: Semantic-Review: reviewer=<role-or-team>; reviewed-at=<YYYY-MM-DD HH:MMZ>; evidence=<substantive observed review evidence>. -->
+<!-- Before adding an entry, propagate the revision through every affected section so the plan remains internally consistent. Before completion, append one visible indented continuation to the final entry using: Semantic-Review: reviewer=<role-or-team>; reviewed-at=<YYYY-MM-DD HH:MMZ, not before the final revision or after current UTC>; content-sha256=<SHA-256 of the exact UTF-8 plan after removing this entire line, including its line ending>; evidence=<substantive observed review evidence>. This digest detects later edits but does not authenticate the reviewer or prove external approval. -->
 
 - (<YYYY-MM-DD HH:MMZ>) Change: Created the initial plan.
   Reason: Establish a restartable implementation record.

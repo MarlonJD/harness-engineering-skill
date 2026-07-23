@@ -55,7 +55,7 @@ The managed lifecycle is valid only when its configured planning authority exist
 4. Record design changes in `Decision Log` at the moment they occur. Record unexpected behavior with concise evidence.
 5. Before completion, run every applicable acceptance command and replace placeholders with observed evidence.
 6. Move unresolved non-blocking follow-up work into the plan outcome or `tech-debt-tracker.md` with impact and next action.
-7. Persist the final semantic review as an indented continuation of the last structured Revision History entry: `Semantic-Review: reviewer=<role-or-team>; reviewed-at=<YYYY-MM-DD HH:MMZ>; evidence=<substantive observed review evidence>`. This is a local durable attestation, not an OpenAI ExecPlan requirement. Run the active completion command with `--semantic-review`; the flag is an explicit current-run assertion and does not replace the recorded attestation.
+7. Persist the final semantic review as one visible indented continuation of the last structured Revision History entry: `Semantic-Review: reviewer=<role-or-team>; reviewed-at=<YYYY-MM-DD HH:MMZ>; content-sha256=<64-lowercase-hex>; evidence=<substantive observed review evidence>`. Set `content-sha256` to SHA-256 over the exact UTF-8 plan bytes after removing that entire attestation line, including its line ending. The review time must be no earlier than the final Revision History entry and no later than the current UTC time. Run the active completion command with `--semantic-review`; the flag is an explicit current-run assertion and does not replace the recorded line.
 8. Move the file to the index's sibling `completed/` directory only when all required progress is checked and the retrospective states achieved behavior, remaining gaps, and evidence.
 9. Update the index atomically with the move. Keep completed plans immutable except for corrections or supersession notes. Validate the completed state with `--semantic-review` and rerun the repository-native check; the completed directory never asserts review automatically.
 
@@ -71,6 +71,8 @@ When revising a plan, propagate the change through every affected section so the
 - Ensure every revision records what changed and why.
 - Verify that commands and outcomes reflect the current tree, not an earlier milestone.
 - Require a semantic review of self-containment, whether `owner` names a real durable role or team, milestone quality, observable behavior, recovery, and evidence; the structural checker rejects known placeholders and sentinel phrases but cannot prove natural-language meaning.
-- Require both the explicit `--semantic-review` assertion and the durable `Semantic-Review:` Revision History continuation described above. Reject completed plans that have only one of them.
+- Require both the explicit `--semantic-review` assertion and the digest-bound `Semantic-Review:` Revision History continuation described above. Reject completed plans that have only one of them or whose plan bytes changed after review.
+
+The digest detects stale local review text; it does not authenticate the reviewer. Anyone who can rewrite the plan can also recompute the digest and replace the reviewer or evidence fields. Treat it only as repository-local consistency evidence, never as human approval, an external security review, production authority, or signed production evidence.
 
 Do not treat moving a file as proof of completion. Treat the recorded behavior and evidence as proof.

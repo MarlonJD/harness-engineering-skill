@@ -12,7 +12,7 @@ Use this rubric to diagnose capabilities, not to reward file count. Record evide
 | 3 — Enforced | CI, structural tests, schemas, or runtime checks prevent known drift. |
 | 4 — Self-maintaining | Scheduled or event-driven loops detect decay, propose repairs, and preserve evidence. |
 
-Production certification is stricter than level 4: it additionally requires a trusted commit binding, fresh per-capability evidence, an exercised production authority and rollback path, and a fail-closed project-native gate. Maturity scoring alone never implies production readiness.
+A future production-ready claim would be stricter than level 4: it would additionally require a trusted source/direct-child attestation commit binding, fresh provider-authenticated evidence per capability, exercised production approval and rollback authority, and a fail-closed project-native gate. The bundled verifier checks only HMAC-consistent candidate records and always returns nonzero `CERT015`; maturity scoring never implies production readiness.
 
 ## Dimensions
 
@@ -53,4 +53,4 @@ Fix the earliest broken feedback loop before adding higher autonomy. Prefer this
 6. Automate maintenance.
 7. Expand autonomy within explicit authority.
 
-Treat missing production, real-device, release, or external approval evidence as a scoped gap, not as proof that ordinary local work failed.
+Treat missing production, real-device, release, or external approval evidence as a scoped gap, not as proof that ordinary local work failed. For any requested production-ready claim, however, every required external authority and production proof is a hard blocker and cannot be replaced by a local assertion, default value, caller-selected HMAC key, or justified `N/A`. The current bundle reports that blocker as `CERT015`.
