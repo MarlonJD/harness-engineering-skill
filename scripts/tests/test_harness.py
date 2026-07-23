@@ -3341,7 +3341,36 @@ _None._
             r"(?m)^policy:\n  allow_implicit_invocation: false$",
         )
         self.assertIn(
+            "Use the globally installed $apply-harness-engineering",
+            openai_metadata,
+        )
+        self.assertIn(
+            "classify it using the skill's adoption-state rules",
+            openai_metadata,
+        )
+        self.assertIn(
+            "perform a fresh adoption only when no harness markers exist",
+            openai_metadata,
+        )
+        self.assertIn(
+            "manual task-completion revalidation without hosted workflow changes",
+            openai_metadata,
+        )
+        self.assertIn(
             "Installing this package only makes the skill available to Codex.",
+            skill_text,
+        )
+        self.assertIn(
+            "treat the invoked package directory as the harness-engineering package authority",
+            skill_text,
+        )
+        self.assertIn("## Classify the adoption state", skill_text)
+        self.assertIn(
+            "Treat the repository as a fresh adoption only when it has no explicit harness configuration",
+            skill_text,
+        )
+        self.assertIn(
+            "When the state is ambiguous, choose migration or repair rather than fresh adoption",
             skill_text,
         )
         self.assertIn(

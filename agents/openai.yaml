@@ -1,6 +1,6 @@
 interface:
   display_name: "Apply Harness Engineering"
   short_description: "Audit and adopt a repository harness safely"
-  default_prompt: "Use $apply-harness-engineering to audit this named repository, implement and verify the complete mapped harness within current authority, and report harness-ready only when the bounded 31-row repository contract passes. Require external production evidence only when --require-production-attestation is explicitly requested."
+  default_prompt: "Use the globally installed $apply-harness-engineering for the named repository: audit first, classify it using the skill's adoption-state rules, perform a fresh adoption only when no harness markers exist, otherwise migrate the existing or partial adoption incrementally, default to manual task-completion revalidation without hosted workflow changes unless explicitly requested, run project-native and bundled checks, report CERT000 only after real certification succeeds, and do not create branches, commit, or push unless explicitly authorized."
 policy:
   allow_implicit_invocation: false

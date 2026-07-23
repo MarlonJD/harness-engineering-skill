@@ -11,6 +11,7 @@ Build the smallest project-specific system that lets an agent discover intent, e
 
 - Installing this package only makes the skill available to Codex. Installation does not inspect, execute, modify, monitor, schedule work for, or certify any repository.
 - Begin repository work only after the user explicitly invokes `$apply-harness-engineering` for a named repository. `agents/openai.yaml` disables implicit invocation, so a natural-language request that does not invoke this skill does not start its workflow. If the request is only to install the skill, stop after installation and report that no adoption occurred.
+- When invoked from a global installation, treat the invoked package directory as the harness-engineering package authority. Read repository-local skill files as target context, but treat copied or older harness packages as migration inputs rather than a newer package contract.
 - Do not treat installation, skill discovery, a scaffold preview, copied templates, or the helper's presence as repository evidence.
 - Installing or invoking the skill grants no deployment credential, secret, production access, human approval, product judgment, destructive-action permission, merge authority, or external-write authority. A required capability that depends on missing authority is `blocked`; never fabricate, default, infer, or self-attest that evidence.
 - `certify` proves that the documented repository-level harness is complete for one inspected source commit and its clean direct-child attestation commit. It does not claim that the product was deployed. Add the optional `--require-production-attestation` flag only when the user explicitly asks for provider-backed production attestation; without such an integration that stricter check fails closed with `CERT015`.
@@ -24,6 +25,13 @@ Build the smallest project-specific system that lets an agent discover intent, e
 - For sustained hardening, add mechanical checks, agent-readable runtime signals, documentation gardening, and entropy cleanup in risk-appropriate increments.
 - For fully adopted harness requests, use the explicitly authorized convergence loop in [certification-and-convergence.md](references/certification-and-convergence.md). Continue through project-specific implementation, evidence capture, the project-native gate, declared invalidation mode, and recovery; do not stop at installation or scaffolding.
 - For an existing harness-ready claim, validate its trusted source and direct-child attestation commits, v2 evidence-integrity records and freshness, project-native maintenance path, coverage, and release/rollback contract when applicable. Treat drift or expiry as a failed claim, never historical proof.
+
+## Classify the adoption state
+
+- Run the adaptive audit before selecting the operation.
+- Treat the repository as a fresh adoption only when it has no explicit harness configuration, harness documentation tree, coverage or certification manifest, evidence records, registered project-native harness checker, repository-local harness package, or mapped equivalent authority.
+- Treat the repository as an existing or partial adoption when any explicit harness artifact or equivalent authority exists. Audit and migrate it incrementally; do not apply a wholesale fresh scaffold.
+- When the state is ambiguous, choose migration or repair rather than fresh adoption. Preserve existing authorities and report the ambiguity.
 
 ## Execute the workflow
 
