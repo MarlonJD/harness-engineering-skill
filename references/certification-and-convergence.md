@@ -6,7 +6,7 @@ Use this contract when the requested outcome is a fully adopted, bounded reposit
 
 Installing this skill is inert: it does not inspect or modify a repository, run project commands, add CI, schedule maintenance, watch for drift, or certify anything. Start the workflow below only after the user explicitly invokes `$apply-harness-engineering` for the named repository; implicit invocation is disabled. Do not claim that installing a skill changes an uninspected repository.
 
-A successful `harness-ready` claim covers only one source commit and its clean direct-child attestation commit, the declared harness evaluation environment, and a non-expired evidence window. It requires every canonical capability to be independently resolved, every applicable capability to have fresh observed evidence, every inapplicable capability to have a fresh applicability record, and a project-native mechanism that continuously invalidates stale claims. The bundled verifier emits `CERT000` and exits zero when this bounded contract passes without an error or warning.
+A successful `harness-ready` claim covers only one source commit and its clean direct-child attestation commit, the declared harness evaluation environment, and a non-expired evidence window. It requires every canonical capability to be independently resolved, every applicable capability to have fresh observed evidence, every inapplicable capability to have a fresh applicability record, and a project-native gate with a declared manual or automated revalidation path. The bundled verifier emits `CERT000` and exits zero when this bounded contract passes without an error or warning.
 
 The workflow does not create deployment credentials, secrets, production access, human approval, production authority, product intent, or irreversible-action permission. Missing authority remains a real `blocked` state for any action that requires it. Do not weaken the harness gate, invent an artifact, or treat a local self-assertion as external evidence.
 
@@ -22,7 +22,7 @@ For an explicit, authorized `$apply-harness-engineering` adoption request, conti
 4. Implement missing repository-native commands, routing, verification, observability, isolation, recovery, review, and maintenance behavior. Do not stop after copying templates.
 5. Exercise each capability through its real project or authorized external boundary. Store one v2 HMAC-consistent record under the configured evidence root and link exactly one record from that coverage row's status cell. Do not treat its locally supplied issuer or key as external authority.
 6. Implement a repository-native fail-closed gate in the project's own language or existing tooling. Do not make CI depend on the installed skill path.
-7. Wire the native gate to pull requests, pushes, and a bounded schedule. When drift is safe and authorized to repair, rerun this convergence loop; otherwise fail the gate and expose the blocker.
+7. Default to manual revalidation: run the native gate before task completion and record fresh evidence. Do not create or modify hosted CI workflow files unless the user explicitly requests CI automation. If requested, wire the native gate to pull requests, pushes, and a bounded schedule. When drift is safe and authorized to repair, rerun this convergence loop; otherwise fail the gate and expose the blocker.
 8. Commit the implementation as source commit `S`; then create one direct-child attestation commit `A` containing only the coverage matrix, certification manifest, and referenced HMAC records. Include approval and rollback records only when the production-authority row is `verified`; use a fresh applicability record and null `production_authority` fields when that row is justified `N/A`.
 9. Re-run project-native tests, the full harness check, the project-native gate, the bundled read-only `certify` command against trusted current commit `A`, and a clean-session agent evaluation. Report `harness-ready` only when `CERT000` returns.
 10. If independent production proof is explicitly requested, rerun certification with `--require-production-attestation`. Treat its provider evidence and outcome separately from ordinary harness readiness.
@@ -60,7 +60,7 @@ The caller supplies an absolute `--attestation-key-file`. The key file must be o
 
 Compute `signature` as HMAC-SHA256 over the domain bytes `harness-engineering-evidence-v2\x00` followed by UTF-8 canonical JSON of every evidence field except `signature`. Canonical JSON uses ASCII escaping, sorted keys, no whitespace separators, and rejects non-finite numbers. Store the lowercase hexadecimal digest. The helper checks record consistency but does not authenticate `issuer`, independently dereference artifact IDs, verify a provider event, or prove the truth of an observation. Never present a valid HMAC as human approval, deployment authority, rollback proof, or production certification.
 
-The project-native gate and continuous-maintenance trace always use the same schema with these capability identities:
+The project-native gate and maintenance trace always use the same schema with these capability identities:
 
 - `project-native-harness-gate`
 - `continuous-harness-maintenance`
@@ -88,7 +88,7 @@ Certification fails on any error or warning and checks:
 - only `verified` or justified `N/A` states, each linked to one fresh HMAC-consistent v2 record bound to `S`, the declared repository identity, and the stable harness evaluation target;
 - an exact digest of the configured coverage matrix;
 - a project-native gate and a maintenance trace;
-- pull-request, push, and scheduled triggers;
+- exactly `manual` maintenance, or pull-request, push, and scheduled triggers when CI automation was explicitly requested;
 - a maximum freshness window of seven days;
 - a substantive harness evaluation environment;
 - no unresolved structural, routing, link, plan, coverage, or semantic warning.
@@ -114,4 +114,4 @@ This explicit request additionally requires:
 
 The current package has no provider-specific asymmetric verifier with a trust root provisioned independently of the repository and invocation. It therefore emits nonzero `CERT015` only when this optional stricter flag is used. The caller-selected HMAC key remains sufficient for ordinary evidence integrity but never substitutes for the requested external verifier. The manifest claim remains `harness-ready`; a `production-ready` claim is rejected with `CERT003`.
 
-Any commit after `A`, source change, evidence change, expired timestamp, missing trigger, failed project-native gate, changed applicability or authority input, or changed coverage digest invalidates `harness-ready`. Continuous maintenance can restore it by selecting the new source state, refreshing records, producing a new direct-child attestation commit, and receiving `CERT000`. It cannot establish external production authority or make a historical claim permanently true.
+Any commit after `A`, source change, evidence change, expired timestamp, invalid declared maintenance mode, failed project-native gate, changed applicability or authority input, or changed coverage digest invalidates `harness-ready` when certification is rerun. Manual or explicitly requested automated maintenance can restore it by selecting the new source state, refreshing records, producing a new direct-child attestation commit, and receiving `CERT000`. It cannot establish external production authority or make a historical claim permanently true.

@@ -46,7 +46,7 @@ OpenAI's case study used local and cloud agent reviewers in a loop until they we
 | Repeated review finding | Fix the current change and inspect nearby occurrences | Promote a stable rule into docs, a test, linter, or structural check |
 | User-facing defect | Capture a reproducible path and validate the repair | Add acceptance evidence and update product or reliability knowledge |
 | Agent cannot proceed | Identify the missing tool, context, signal, or permission | Improve the registry/harness or escalate the judgment boundary |
-| Harness gate or scheduled maintenance failure | Repair only safe explicitly authorized drift, refresh affected certification records, and keep harness-ready invalid until every local gate passes and `CERT000` returns; preserve `CERT015` only for an explicitly requested unavailable production verifier | Add the reproducer, update coverage, and preserve the invalidation/recovery trace |
+| Harness gate or maintenance failure | Repair only safe explicitly authorized drift, refresh affected certification records, and keep harness-ready invalid until every local gate passes and `CERT000` returns; preserve `CERT015` only for an explicitly requested unavailable production verifier | Add the reproducer, update coverage, and preserve the invalidation/recovery trace |
 
 ## Escalation boundaries
 

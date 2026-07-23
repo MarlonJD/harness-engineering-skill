@@ -2,7 +2,7 @@
 
 Run this sweep at a cadence justified by repository change rate. Keep the process read-only until a finding is verified; use an ExecPlan for broad remediation.
 
-The cadence must be implemented by an explicitly authorized repository-native runner. Installing the external skill does not schedule this sweep or grant repair, pull-request, merge, release, or production authority.
+The cadence may be a manual repository-native procedure. Installing the external skill does not schedule this sweep or grant repair, pull-request, merge, release, or production authority. Do not add hosted automation unless the user explicitly requests it.
 
 ## Documentation and navigation
 
@@ -25,7 +25,7 @@ The cadence must be implemented by an explicitly authorized repository-native ru
 - [ ] Confirm UI, API, migration, or operational evidence still matches the verification matrix.
 - [ ] Check isolation and cleanup for concurrent or long-running agent work.
 - [ ] Confirm every completed coverage status links to one fresh HMAC-consistent v2 certification record for the source commit; do not describe the HMAC as external authentication.
-- [ ] Confirm an explicitly authorized project-native harness gate runs on its declared pull-request, push, and schedule triggers; exercise one invalidate-and-recover path and restore `CERT000`.
+- [ ] Confirm the project-native harness gate runs through its declared manual mode, or through pull-request, push, and schedule triggers when CI automation was explicitly requested; exercise one invalidate-and-recover path and restore `CERT000`.
 - [ ] Expire harness-ready when its source/attestation commits, repository or evaluation-target identity, coverage digest, record signature, or freshness window no longer matches. When `--require-production-attestation` is in use, also expire it on any approval, rollback, provider, artifact, or revocation mismatch and report `CERT015` if the required provider verifier is unavailable.
 
 ## Triage

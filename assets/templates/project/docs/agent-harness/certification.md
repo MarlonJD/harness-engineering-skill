@@ -7,8 +7,8 @@ The bundled verifier can issue the bounded claim `harness-ready`. It checks the 
 - Owner: <!-- TODO(harness): durable role or team -->
 - Project-native gate: <!-- TODO(harness): exact repository command; do not depend on the installed skill path -->
 - Authorized safe repair command or procedure: <!-- TODO(harness): bounded repository-native convergence path and trigger -->
-- Evidence record issuer: <!-- TODO(harness): local/CI process that observes harness checks; this field is not externally authenticated -->
-- Evidence HMAC key custody: <!-- TODO(harness): secret-store owner and CI policy; never record the key -->
+- Evidence record issuer: <!-- TODO(harness): local process or explicitly requested CI that observes harness checks; this field is not externally authenticated -->
+- Evidence HMAC key custody: <!-- TODO(harness): key owner and storage policy; never record the key -->
 - Optional production verifier: <!-- TODO(harness): provider-specific asymmetric verifier or explicitly unavailable/N/A -->
 - Escalation boundary: <!-- TODO(harness): production, secret, human-approval, destructive, external-write, and product-judgment blockers -->
 
@@ -16,13 +16,13 @@ Missing project commands, current evidence, or source-control authority blocks `
 
 ## Source and attestation commits
 
-Commit all implementation, project commands, CI, and maintenance behavior as source commit `S`. Every HMAC-consistent evidence record and `certification.json.repository_commit` names `S`.
+Commit all implementation, project commands, maintenance behavior, and any explicitly requested CI as source commit `S`. Every HMAC-consistent evidence record and `certification.json.repository_commit` names `S`.
 
 Create direct-child attestation commit `A` only after the harness checks were observed and recorded. `A` may change exactly the configured coverage matrix, configured certification manifest, one referenced HMAC JSON file for every `verified` or justified `N/A` row, and the named project-gate and maintenance files. When the production-authority row is `verified`, it also includes the named approval and rollback records; when that row is justified `N/A`, all three `production_authority` fields are `null` and no approval or rollback record belongs in the overlay. `A` must contain no implementation change. The certification check receives trusted current `A` as `--commit`; `A` must be clean `HEAD` and have `S` as its only parent. Any next commit invalidates `harness-ready`.
 
-## Continuous invalidation
+## Revalidation and invalidation
 
-Run the project-native harness gate on pull requests, pushes, and a schedule no longer than the manifest's `max_age_hours`. Fail closed when routing, commands, records, declared applicability or authority, behavior, or the [`coverage matrix`](coverage-matrix.md) drifts. An explicitly authorized repository-native maintenance trigger may repair only safe drift within existing repository and user authority. A successful recovery produces fresh evidence and a new `CERT000` result; it cannot invent production authority.
+Use `triggers: ["manual"]` by default and run the project-native harness gate before task completion. Do not create or modify hosted CI workflow files unless the user explicitly requests CI automation. If requested, replace manual mode with pull-request, push, and scheduled triggers no less frequent than the manifest's `max_age_hours`. Fail closed when routing, commands, records, declared applicability or authority, behavior, or the [`coverage matrix`](coverage-matrix.md) drifts. An explicitly authorized repository-native maintenance path may repair only safe drift within existing repository and user authority. A successful recovery produces fresh evidence and a new `CERT000` result; it cannot invent production authority.
 
 ## Evidence rules
 
@@ -44,4 +44,4 @@ Add `--require-production-attestation` only when independent production evidence
 
 The bundled package currently has no provider-specific asymmetric verifier with an independently provisioned trust root. Therefore ordinary valid certification returns `CERT000`, while an explicit `--require-production-attestation` request returns nonzero `CERT015` until such a verifier is configured. The manifest claim remains `harness-ready`; changing it to `production-ready` is rejected with `CERT003` and does not simulate production proof.
 
-<!-- TODO(harness): Record the repository-native CI job, explicitly authorized scheduled maintenance mechanism, harness-gate consumer, failure notification, and one observed invalidate-and-recover trace. -->
+<!-- TODO(harness): Record the repository-native manual command and one observed invalidate-and-recover trace. If CI automation was explicitly requested, also record the CI job, triggers, consumer, and failure notification. -->

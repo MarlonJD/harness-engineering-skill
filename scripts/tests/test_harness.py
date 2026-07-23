@@ -3250,7 +3250,34 @@ _None._
         self.assertNotIn("CERT015", strict_ids)
         self.assertNotIn("CERT000", strict_ids)
 
-    def test_certification_requires_continuous_native_and_production_gates(self) -> None:
+    def test_certification_accepts_manual_maintenance_without_ci_workflows(self) -> None:
+        fixture = CertificationFixture(manifest_mutation="manual-triggers")
+        self.addCleanup(fixture.close)
+        result = fixture.run_cli()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        ids = {
+            item["id"]
+            for item in json.loads(result.stdout)["findings"]
+        }
+        self.assertIn("CERT000", ids)
+        self.assertNotIn("CERT006", ids)
+
+    def test_bundled_certification_defaults_to_manual_maintenance(self) -> None:
+        manifest = json.loads(
+            (
+                harness.TEMPLATE_ROOT
+                / "docs/agent-harness/certification.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(["manual"], manifest["maintenance"]["triggers"])
+        skill_text = (harness.SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "Do not create or modify GitHub Actions, GitLab CI, or other hosted workflow files "
+            "unless the user explicitly requests CI automation",
+            skill_text,
+        )
+
+    def test_certification_requires_declared_maintenance_native_and_production_gates(self) -> None:
         cases = ("triggers", "native", "approval")
         for case in cases:
             with self.subTest(case=case):

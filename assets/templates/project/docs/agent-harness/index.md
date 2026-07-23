@@ -2,7 +2,7 @@
 
 This directory is the progressive-disclosure entry point for capabilities that help coding agents work reliably in this repository.
 
-Its presence records an explicit repository adoption; installing the external skill neither creates this directory nor runs any workflow. The repository's own checked-in gates and schedules, once deliberately implemented, own continuous invalidation.
+Its presence records an explicit repository adoption; installing the external skill neither creates this directory nor runs any workflow. The repository's checked-in gate owns manual task-completion revalidation by default. Hosted workflows and schedules are optional and require an explicit user request.
 
 Root [`AGENTS.md`](../../AGENTS.md) is the canonical instruction map. If root `AGENTS.override.md` exists, Codex loads that higher-precedence entry point instead, and it must preserve routes to the same authorities before the effective `project_doc_max_bytes` cutoff. Codex defaults that budget to 32 KiB and combines project instructions from root toward the working directory. `config.json` declares downstream authorities but does not make an arbitrary instruction filename auto-loadable or change Codex configuration.
 
@@ -18,7 +18,7 @@ Root [`AGENTS.md`](../../AGENTS.md) is the canonical instruction map. If root `A
 | Change-to-verification mapping | [`verification-matrix.md`](verification-matrix.md) |
 | Recurring drift cleanup | [`entropy-cleanup-checklist.md`](entropy-cleanup-checklist.md) |
 | Source-principle coverage | [`coverage-matrix.md`](coverage-matrix.md) |
-| Harness-ready certification, continuous invalidation, and optional production attestation | [`certification.md`](certification.md) and [`certification.json`](certification.json) |
+| Harness-ready certification, revalidation, and optional production attestation | [`certification.md`](certification.md) and [`certification.json`](certification.json) |
 | Long-running work | [`../exec-plans/index.md`](../exec-plans/index.md) |
 
 ## Route by task

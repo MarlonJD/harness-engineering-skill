@@ -396,6 +396,10 @@ class CertificationFixture:
             maintenance = manifest["maintenance"]
             assert isinstance(maintenance, dict)
             maintenance["triggers"] = ["push"]
+        elif manifest_mutation == "manual-triggers":
+            maintenance = manifest["maintenance"]
+            assert isinstance(maintenance, dict)
+            maintenance["triggers"] = ["manual"]
         elif manifest_mutation == "native-evidence":
             project_gate = manifest["project_native_gate"]
             assert isinstance(project_gate, dict)

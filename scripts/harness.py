@@ -5032,7 +5032,7 @@ def validate_certification(
             "error",
             rel,
             "Maintenance contract does not exactly match the HMAC-consistent v2 harness schema.",
-            "Declare command, pull-request/push/schedule triggers, max_age_hours, and evidence.",
+            "Declare command, manual or explicitly requested automated triggers, max_age_hours, and evidence.",
         )
     else:
         raw_age = maintenance.get("max_age_hours")
@@ -5055,15 +5055,25 @@ def validate_certification(
                     "Expire the harness manifest no later than max_age_hours after issuance.",
                 )
         triggers = maintenance.get("triggers")
-        if not isinstance(triggers, list) or not {"pull_request", "push", "schedule"}.issubset(
-            {item for item in triggers if isinstance(item, str)}
-        ):
+        trigger_values = (
+            triggers
+            if isinstance(triggers, list)
+            and all(isinstance(item, str) for item in triggers)
+            else []
+        )
+        automated_triggers = {"pull_request", "push", "schedule"}
+        manual_maintenance = trigger_values == ["manual"]
+        automated_maintenance = (
+            "manual" not in trigger_values
+            and automated_triggers.issubset(set(trigger_values))
+        )
+        if not manual_maintenance and not automated_maintenance:
             report.add(
                 "CERT006",
                 "error",
                 rel,
-                "Continuous maintenance is not triggered on pull requests, pushes, and a schedule.",
-                "Wire the project-native gate to all three triggers so drift invalidates the claim.",
+                "Maintenance triggers are neither manual nor a complete automated trigger set.",
+                "Use exactly ['manual'] for task-completion revalidation, or declare pull_request, push, and schedule after the user explicitly requests CI automation.",
             )
         if not substantive_certification_string(maintenance.get("command")):
             report.add(
@@ -5374,7 +5384,7 @@ def certify_repository(
                 "info",
                 authorities["certification"],
                 "Harness-ready certification is current for the asserted source and attestation commits.",
-                "Keep the project-native pull-request, push, and scheduled maintenance gates active; relevant drift requires fresh evidence and re-certification.",
+                "Keep the declared manual or automated maintenance path usable; relevant drift requires fresh evidence and re-certification.",
             )
     return report.normalized()
 

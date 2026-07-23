@@ -17,9 +17,7 @@
   "maintenance": {
     "command": "<replace-with-project-native-maintenance-command>",
     "triggers": [
-      "pull_request",
-      "push",
-      "schedule"
+      "manual"
     ],
     "max_age_hours": 168,
     "evidence": "docs/agent-harness/evidence/continuous-maintenance.json"
