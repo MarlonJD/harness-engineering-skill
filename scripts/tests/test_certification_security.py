@@ -27,7 +27,7 @@ SPEC.loader.exec_module(harness)
 TEST_KEY = b"independent-test-attestation-key-material-0123456789"
 HMAC_CONTEXT = b"harness-engineering-evidence-v2\x00"
 REPOSITORY_IDENTITY = "scm://example.invalid/platform/harness-fixture"
-DEPLOYMENT_TARGET_ID = "deploy://example.invalid/production/harness-fixture"
+DEPLOYMENT_TARGET_ID = "harness://example.invalid/repository/harness-fixture"
 
 
 def put(root: Path, relative: str, text: str) -> Path:
@@ -129,7 +129,10 @@ class CertificationFixture:
         first_link_as_image: bool = False,
         manifest_mutation: str | None = None,
         named_evidence_mutation: str | None = None,
-        manifest_claim: str = "candidate-only",
+        manifest_claim: str = "harness-ready",
+        manifest_environment: object = "ci",
+        authority_shape: str | None = None,
+        include_production_files_when_na: bool = False,
         gitattributes_filter: bool = False,
     ) -> None:
         self.repository_temporary = tempfile.TemporaryDirectory()
@@ -309,6 +312,13 @@ class CertificationFixture:
             ),
         }
         for filename, (capability, environment, command) in named.items():
+            if (
+                production_na
+                and not include_production_files_when_na
+                and filename
+                in {"production-approval.json", "production-rollback.json"}
+            ):
+                continue
             payload = evidence_payload(
                 capability,
                 self.source_commit,
@@ -346,7 +356,7 @@ class CertificationFixture:
             "repository_commit": self.source_commit,
             "repository_identity": REPOSITORY_IDENTITY,
             "deployment_target_id": DEPLOYMENT_TARGET_ID,
-            "environment": "production",
+            "environment": manifest_environment,
             "issued_at": issued_at,
             "expires_at": expires_at,
             "coverage_sha256": hashlib.sha256(coverage_text.encode()).hexdigest(),
@@ -361,11 +371,22 @@ class CertificationFixture:
                 "max_age_hours": 48,
                 "evidence": "docs/agent-harness/evidence/continuous-maintenance.json",
             },
-            "production_authority": {
-                "owner": "release-engineering",
-                "approval_evidence": "docs/agent-harness/evidence/production-approval.json",
-                "rollback_evidence": "docs/agent-harness/evidence/production-rollback.json",
-            },
+            "production_authority": (
+                {
+                    "owner": None,
+                    "approval_evidence": None,
+                    "rollback_evidence": None,
+                }
+                if (
+                    authority_shape == "null"
+                    or (production_na and authority_shape != "configured")
+                )
+                else {
+                    "owner": "release-engineering",
+                    "approval_evidence": "docs/agent-harness/evidence/production-approval.json",
+                    "rollback_evidence": "docs/agent-harness/evidence/production-rollback.json",
+                }
+            ),
         }
         if manifest_mutation == "expired":
             manifest["expires_at"] = issued_at
@@ -401,6 +422,7 @@ class CertificationFixture:
         commit: str | None = None,
         key_path: Path | None = None,
         allow_non_git: bool = False,
+        require_production_attestation: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         arguments = [
             sys.executable,
@@ -419,6 +441,8 @@ class CertificationFixture:
         ]
         if allow_non_git:
             arguments.append("--allow-non-git")
+        if require_production_attestation:
+            arguments.append("--require-production-attestation")
         return subprocess.run(
             arguments,
             text=True,
@@ -446,22 +470,93 @@ class CertificationSecurityTests(unittest.TestCase):
         self.assertNotIn("CERT000", {item["id"] for item in findings})
         return payload
 
-    def test_self_selected_hmac_candidate_is_read_only_but_cannot_certify(self) -> None:
+    def test_complete_harness_contract_certifies_read_only(self) -> None:
         fixture = self.fixture()
         before = tree_fingerprint(fixture.root)
         result = fixture.run_cli()
-        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         payload = json.loads(result.stdout)
         ids = {item["id"] for item in payload["findings"]}
-        self.assertIn("CERT015", ids)
-        self.assertNotIn("CERT000", ids)
+        self.assertIn("CERT000", ids)
+        self.assertNotIn("CERT015", ids)
+        self.assertEqual(0, payload["summary"]["errors"])
+        self.assertEqual(0, payload["summary"]["warnings"])
+        self.assertEqual(before, tree_fingerprint(fixture.root))
+
+    def test_optional_production_attestation_fails_without_external_verifier(
+        self,
+    ) -> None:
+        fixture = self.fixture(manifest_environment="production")
+        result = fixture.run_cli(require_production_attestation=True)
+        payload = self.assert_failed_with(result, "CERT015")
         certification_errors = {
             item["id"]
             for item in payload["findings"]
             if item["severity"] == "error" and item["id"].startswith("CERT")
         }
         self.assertEqual({"CERT015"}, certification_errors)
-        self.assertEqual(before, tree_fingerprint(fixture.root))
+
+    def test_strict_production_attestation_rejects_non_production_scope(
+        self,
+    ) -> None:
+        fixture = self.fixture()
+        result = fixture.run_cli(require_production_attestation=True)
+        payload = self.assert_failed_with(result, "CERT003")
+        ids = {item["id"] for item in payload["findings"]}
+        self.assertNotIn("CERT015", ids)
+
+    def test_production_authority_shape_matches_coverage_applicability(
+        self,
+    ) -> None:
+        cases = (
+            {"production_na": True, "authority_shape": "configured"},
+            {"production_na": False, "authority_shape": "null"},
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                fixture = CertificationFixture(**case)
+                try:
+                    payload = self.assert_failed_with(
+                        fixture.run_cli(),
+                        "CERT011",
+                    )
+                    self.assertNotIn(
+                        "CERT000",
+                        {item["id"] for item in payload["findings"]},
+                    )
+                finally:
+                    fixture.close()
+
+    def test_harness_environment_is_substantive_and_exactly_typed(self) -> None:
+        for environment in (None, False, "", "<replace-with-scope>"):
+            with self.subTest(environment=environment):
+                fixture = CertificationFixture(
+                    manifest_environment=environment,
+                )
+                try:
+                    payload = self.assert_failed_with(
+                        fixture.run_cli(),
+                        "CERT003",
+                    )
+                    self.assertNotIn(
+                        "CERT000",
+                        {item["id"] for item in payload["findings"]},
+                    )
+                finally:
+                    fixture.close()
+
+    def test_non_deployable_overlay_rejects_unreferenced_authority_files(
+        self,
+    ) -> None:
+        fixture = self.fixture(
+            production_na=True,
+            include_production_files_when_na=True,
+        )
+        payload = self.assert_failed_with(fixture.run_cli(), "CERT014")
+        self.assertNotIn(
+            "CERT000",
+            {item["id"] for item in payload["findings"]},
+        )
 
     def test_v1_locally_forged_production_evidence_is_rejected(self) -> None:
         fixture = self.fixture(v1_evidence="production-approval.json")
@@ -479,7 +574,7 @@ class CertificationSecurityTests(unittest.TestCase):
         fixture = self.fixture(manifest_claim="production-ready")
         payload = self.assert_failed_with(fixture.run_cli(), "CERT003")
         ids = {item["id"] for item in payload["findings"]}
-        self.assertIn("CERT015", ids)
+        self.assertNotIn("CERT015", ids)
         self.assertNotIn("CERT000", ids)
 
     def test_boolean_float_and_empty_capability_evidence_fail_closed(self) -> None:
@@ -648,10 +743,11 @@ class CertificationSecurityTests(unittest.TestCase):
         git(fixture.root, "config", "filter.evil.clean", str(filter_script))
         git(fixture.root, "config", "filter.evil.required", "true")
         result = fixture.run_cli()
-        self.assertNotEqual(0, result.returncode)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         payload = json.loads(result.stdout)
         ids = {item["id"] for item in payload["findings"]}
-        self.assertIn("CERT015", ids)
+        self.assertIn("CERT000", ids)
+        self.assertNotIn("CERT015", ids)
         self.assertNotIn("CERT014", ids)
         self.assertFalse(sentinel.exists())
 
@@ -918,8 +1014,8 @@ class CertificationSecurityTests(unittest.TestCase):
             "CERT014",
         )
 
-    def test_fork_origin_replay_never_becomes_production_ready(self) -> None:
-        fixture = self.fixture()
+    def test_fork_origin_replay_never_becomes_production_attested(self) -> None:
+        fixture = self.fixture(manifest_environment="production")
         replay_temporary = tempfile.TemporaryDirectory()
         self.addCleanup(replay_temporary.cleanup)
         replay_root = Path(replay_temporary.name) / "different-origin"
@@ -931,7 +1027,10 @@ class CertificationSecurityTests(unittest.TestCase):
             env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
         )
         self.assertEqual(0, completed.returncode, completed.stderr)
-        result = fixture.run_cli(root=replay_root)
+        result = fixture.run_cli(
+            root=replay_root,
+            require_production_attestation=True,
+        )
         self.assertNotEqual(0, result.returncode)
         ids = {item["id"] for item in json.loads(result.stdout)["findings"]}
         self.assertIn("CERT015", ids)

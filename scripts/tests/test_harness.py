@@ -3209,31 +3209,46 @@ _None._
                 self.assertIn("CERT009", ids)
                 self.assertNotIn("CERT000", ids)
 
-    def test_certification_accepts_evidenced_na_but_not_production_na(self) -> None:
+    def test_harness_certification_accepts_evidenced_na_including_non_deployable_projects(
+        self,
+    ) -> None:
         applicable = CertificationFixture(mutate_first_evidence="n/a")
         self.addCleanup(applicable.close)
         accepted = applicable.run_cli()
-        self.assertNotEqual(0, accepted.returncode)
+        self.assertEqual(0, accepted.returncode, accepted.stdout + accepted.stderr)
         accepted_payload = json.loads(accepted.stdout)
         accepted_ids = {item["id"] for item in accepted_payload["findings"]}
-        self.assertIn("CERT015", accepted_ids)
-        self.assertNotIn("CERT000", accepted_ids)
-        self.assertEqual(
-            {"CERT015"},
-            {
-                item["id"]
-                for item in accepted_payload["findings"]
-                if item["severity"] == "error" and item["id"].startswith("CERT")
-            },
-        )
+        self.assertIn("CERT000", accepted_ids)
+        self.assertNotIn("CERT015", accepted_ids)
 
         production = CertificationFixture(production_na=True)
         self.addCleanup(production.close)
-        rejected = production.run_cli()
+        accepted_non_deployable = production.run_cli()
+        self.assertEqual(
+            0,
+            accepted_non_deployable.returncode,
+            accepted_non_deployable.stdout + accepted_non_deployable.stderr,
+        )
+        ids = {
+            item["id"]
+            for item in json.loads(accepted_non_deployable.stdout)["findings"]
+        }
+        self.assertIn("CERT000", ids)
+        self.assertNotIn("CERT015", ids)
+
+        strict_production = CertificationFixture(
+            production_na=True,
+            manifest_environment="production",
+        )
+        self.addCleanup(strict_production.close)
+        rejected = strict_production.run_cli(require_production_attestation=True)
         self.assertNotEqual(0, rejected.returncode)
-        ids = {item["id"] for item in json.loads(rejected.stdout)["findings"]}
-        self.assertIn("CERT009", ids)
-        self.assertNotIn("CERT000", ids)
+        strict_ids = {
+            item["id"] for item in json.loads(rejected.stdout)["findings"]
+        }
+        self.assertIn("CERT009", strict_ids)
+        self.assertNotIn("CERT015", strict_ids)
+        self.assertNotIn("CERT000", strict_ids)
 
     def test_certification_requires_continuous_native_and_production_gates(self) -> None:
         cases = ("triggers", "native", "approval")

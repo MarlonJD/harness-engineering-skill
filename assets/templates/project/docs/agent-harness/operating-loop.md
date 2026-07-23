@@ -26,7 +26,7 @@ Run this loop only after an explicit repository-scoped request or an already-aut
 8. Review the diff, test coverage, generated artifacts, failure modes, and recovery path.
 9. Request additional agent or human review when available and justified; address findings and repeat verification.
 10. Update the ExecPlan, architecture, product knowledge, registry, debt, or enforcement rule that changed.
-11. Refresh affected HMAC-consistent v2 candidate records and rerun the project-native candidate gate for a new trusted source/direct-child attestation pair, or invalidate the candidate. Keep any requested production-ready outcome blocked by nonzero `CERT015`; local maintenance cannot supply the missing provider verifier.
+11. Refresh affected HMAC-consistent v2 certification records and rerun the project-native harness gate for a new trusted source/direct-child attestation pair, or invalidate `harness-ready`. Require a fresh `CERT000` result. If `--require-production-attestation` is explicitly in use, separately refresh its provider evidence or report `CERT015`; local maintenance cannot invent provider authority.
 12. Hand off with literal evidence labels from the output contract.
 
 ## Review policy decision
@@ -46,7 +46,7 @@ OpenAI's case study used local and cloud agent reviewers in a loop until they we
 | Repeated review finding | Fix the current change and inspect nearby occurrences | Promote a stable rule into docs, a test, linter, or structural check |
 | User-facing defect | Capture a reproducible path and validate the repair | Add acceptance evidence and update product or reliability knowledge |
 | Agent cannot proceed | Identify the missing tool, context, signal, or permission | Improve the registry/harness or escalate the judgment boundary |
-| Candidate gate or scheduled maintenance failure | Repair only safe explicitly authorized drift, refresh affected candidate records, and keep the candidate failed until every local gate passes; preserve `CERT015` | Add the reproducer, update coverage, and preserve the invalidation/recovery trace |
+| Harness gate or scheduled maintenance failure | Repair only safe explicitly authorized drift, refresh affected certification records, and keep harness-ready invalid until every local gate passes and `CERT000` returns; preserve `CERT015` only for an explicitly requested unavailable production verifier | Add the reproducer, update coverage, and preserve the invalidation/recovery trace |
 
 ## Escalation boundaries
 

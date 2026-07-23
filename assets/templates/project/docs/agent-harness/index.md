@@ -18,7 +18,7 @@ Root [`AGENTS.md`](../../AGENTS.md) is the canonical instruction map. If root `A
 | Change-to-verification mapping | [`verification-matrix.md`](verification-matrix.md) |
 | Recurring drift cleanup | [`entropy-cleanup-checklist.md`](entropy-cleanup-checklist.md) |
 | Source-principle coverage | [`coverage-matrix.md`](coverage-matrix.md) |
-| Candidate integrity, continuous invalidation, and the `CERT015` external-verifier blocker | [`certification.md`](certification.md) and [`certification.json`](certification.json) |
+| Harness-ready certification, continuous invalidation, and optional production attestation | [`certification.md`](certification.md) and [`certification.json`](certification.json) |
 | Long-running work | [`../exec-plans/index.md`](../exec-plans/index.md) |
 
 ## Route by task
@@ -34,7 +34,7 @@ Root [`AGENTS.md`](../../AGENTS.md) is the canonical instruction map. If root `A
 | Sweep drift and technical debt | [`entropy-cleanup-checklist.md`](entropy-cleanup-checklist.md) | [`../exec-plans/tech-debt-tracker.md`](../exec-plans/tech-debt-tracker.md) or a new active plan |
 | Prepare security, reliability, release, or external work | [`output-contract.md`](output-contract.md) | [`../SECURITY.md`](../SECURITY.md), [`../RELIABILITY.md`](../RELIABILITY.md), and applicable approval rules |
 | Audit whether the harness is complete | [`coverage-matrix.md`](coverage-matrix.md) | Verify every applicable row with a repository artifact and observed evidence |
-| Converge a local candidate and assess the production blocker | [`certification.md`](certification.md) | Resolve every coverage row with HMAC-consistent v2 candidate records, run the project-native candidate gate, validate the source/direct-child attestation pair, and preserve nonzero `CERT015` until an independently provisioned provider verifier exists |
+| Certify the repository harness | [`certification.md`](certification.md) | Resolve all 31 coverage rows with HMAC-consistent v2 records, run the project-native gate, validate the source/direct-child attestation pair, and require `CERT000`; add `--require-production-attestation` only when independent production evidence is explicitly in scope |
 
 ## Operating loop
 

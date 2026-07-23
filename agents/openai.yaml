@@ -1,6 +1,6 @@
 interface:
   display_name: "Apply Harness Engineering"
   short_description: "Audit and adopt a repository harness safely"
-  default_prompt: "Use $apply-harness-engineering to audit this named repository, implement the mapped harness within current authority, and report a blocker instead of claiming production readiness when any required command or external evidence is unavailable."
+  default_prompt: "Use $apply-harness-engineering to audit this named repository, implement and verify the complete mapped harness within current authority, and report harness-ready only when the bounded 31-row repository contract passes. Require external production evidence only when --require-production-attestation is explicitly requested."
 policy:
   allow_implicit_invocation: false

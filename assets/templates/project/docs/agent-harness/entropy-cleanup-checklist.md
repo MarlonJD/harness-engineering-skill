@@ -24,9 +24,9 @@ The cadence must be implemented by an explicitly authorized repository-native ru
 - [ ] Check flaky tests, stale fixtures, inaccessible logs, and nondeterministic setup/reset paths.
 - [ ] Confirm UI, API, migration, or operational evidence still matches the verification matrix.
 - [ ] Check isolation and cleanup for concurrent or long-running agent work.
-- [ ] Confirm every completed coverage status links to one fresh HMAC-consistent v2 candidate record for the source commit; do not describe the HMAC as external authentication.
-- [ ] Confirm an explicitly authorized project-native candidate gate runs on its declared pull-request, push, and schedule triggers; exercise one invalidate-and-recover path and preserve nonzero `CERT015`.
-- [ ] Expire any candidate whose source/attestation commits, repository or target identity, coverage digest, record signature, declared approval or rollback input, or freshness window no longer matches. Reject any production-ready claim while the external provider verifier is unavailable.
+- [ ] Confirm every completed coverage status links to one fresh HMAC-consistent v2 certification record for the source commit; do not describe the HMAC as external authentication.
+- [ ] Confirm an explicitly authorized project-native harness gate runs on its declared pull-request, push, and schedule triggers; exercise one invalidate-and-recover path and restore `CERT000`.
+- [ ] Expire harness-ready when its source/attestation commits, repository or evaluation-target identity, coverage digest, record signature, or freshness window no longer matches. When `--require-production-attestation` is in use, also expire it on any approval, rollback, provider, artifact, or revocation mismatch and report `CERT015` if the required provider verifier is unavailable.
 
 ## Triage
 

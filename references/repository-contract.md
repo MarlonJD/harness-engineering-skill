@@ -25,9 +25,9 @@ Keep one authoritative home for each kind of knowledge. Link from indexes instea
 | `docs/agent-harness/verification-matrix.md` | Requirement-to-check-to-evidence mapping | A surface, risk, or verification path changes |
 | `docs/agent-harness/entropy-cleanup-checklist.md` | Recurring drift checks and escalation rules | A recurring anti-pattern or cleanup loop changes |
 | `docs/agent-harness/coverage-matrix.md` | Source-principle-to-artifact-to-evidence traceability | A harness capability is added, removed, or reclassified |
-| `docs/agent-harness/certification.md` | Repository-specific candidate convergence, invalidation, and the `CERT015` external-verifier blocker | The native gate, CI triggers, repair authority, or future verifier boundary changes |
-| `docs/agent-harness/certification.json` | Source-commit-, repository-, target-, environment-, coverage-, and freshness-bound `candidate-only` manifest carried in a direct-child attestation commit | Any bound commit, identity, record, coverage digest, or freshness window changes |
-| `docs/agent-harness/evidence/` | HMAC-consistent v2 candidate observation records referenced by coverage and the manifest; not externally authenticated production proof | A capability is exercised, reclassified, invalidated, or refreshed |
+| `docs/agent-harness/certification.md` | Repository-specific harness-ready convergence, invalidation, and optional production-attestation boundary | The native gate, CI triggers, repair authority, evidence profile, or provider-verifier boundary changes |
+| `docs/agent-harness/certification.json` | Source-commit-, repository-, evaluation-target-, environment-, coverage-, and freshness-bound `harness-ready` manifest carried in a direct-child attestation commit | Any bound commit, identity, record, coverage digest, applicability decision, or freshness window changes |
+| `docs/agent-harness/evidence/` | HMAC-consistent v2 harness observation and applicability records referenced by coverage and the manifest; not externally authenticated production proof | A capability is exercised, reclassified, invalidated, or refreshed |
 
 ## Navigation rules
 
@@ -39,7 +39,7 @@ Keep one authoritative home for each kind of knowledge. Link from indexes instea
 - Record `last verified` only when a person or command can actually refresh it.
 - Mark generated documents with their source and regeneration command. Do not hand-edit generated content.
 - Use `N/A` with a reason for intentionally absent surfaces; do not leave unexplained empty sections.
-- Treat every candidate manifest as expiring state, not durable truth. Bind HMAC-consistent v2 records and the manifest to source commit `S`, bind verification to clean direct-child attestation commit `A`, and keep candidate records under the configured repository evidence root. Any later commit invalidates `A`; the bundled verifier still returns `CERT015` because these records are not provider-authenticated production proof.
+- Treat every harness-ready manifest as expiring state, not durable truth. Bind HMAC-consistent v2 records and the manifest to source commit `S`, bind verification to clean direct-child attestation commit `A`, and keep records under the configured repository evidence root. Any later commit invalidates `A`. Complete, current ordinary certification returns `CERT000`; the records remain local integrity evidence rather than provider-authenticated production proof. Emit `CERT015` only when `--require-production-attestation` was explicitly requested and its provider verifier is unavailable.
 - Treat the installed skill as external tooling, not a repository lifecycle service. Installation alone creates no repository files, CI gate, scheduled invalidation, evidence, certificate, or repair authority.
 
 ## Change rules

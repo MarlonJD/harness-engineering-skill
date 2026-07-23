@@ -4394,6 +4394,8 @@ def certification_overlay_paths(
     evidence_root: Path,
     rows: Sequence[CoverageRow],
     payload: dict[str, object],
+    *,
+    include_production_authority_evidence: bool = True,
 ) -> tuple[set[str], list[str]]:
     """Resolve the exact files permitted in the one-commit attestation overlay."""
     paths = {
@@ -4446,7 +4448,7 @@ def certification_overlay_paths(
     if isinstance(maintenance, dict):
         named_paths.append(maintenance.get("evidence"))
     authority = payload.get("production_authority")
-    if isinstance(authority, dict):
+    if include_production_authority_evidence and isinstance(authority, dict):
         named_paths.extend(
             (
                 authority.get("approval_evidence"),
@@ -4856,6 +4858,7 @@ def validate_certification(
     *,
     now: datetime | None = None,
     attestation_key_file: str | Path | None = None,
+    require_production_attestation: bool = False,
 ) -> None:
     root = resolve_safe_directory(root)
     now = now or datetime.now(timezone.utc)
@@ -4866,8 +4869,8 @@ def validate_certification(
             "CERT001",
             "error",
             rel,
-            "Candidate-integrity manifest is missing or unsafe.",
-            "Create and tailor the configured HMAC-consistent v2 candidate manifest; it cannot establish production authority.",
+            "Harness certification manifest is missing or unsafe.",
+            "Create and tailor the configured HMAC-consistent v2 harness manifest.",
         )
         return
     payload, issue = certification_json_object(root, certification_path)
@@ -4876,7 +4879,7 @@ def validate_certification(
             "CERT001",
             "error",
             rel,
-            f"Candidate-integrity manifest {issue}.",
+            f"Harness certification manifest {issue}.",
             "Restore a regular UTF-8 JSON v2 manifest.",
         )
         return
@@ -4911,25 +4914,25 @@ def validate_certification(
             "CERT002",
             "error",
             rel,
-            "Candidate-integrity manifest does not exactly match the HMAC-consistent v2 "
+            "Harness certification manifest does not exactly match the HMAC-consistent v2 "
             f"top-level schema.{version_detail}",
             "Keep every required v2 field once and remove unknown top-level fields.",
         )
         return
-    if payload.get("claim") != "candidate-only":
+    if payload.get("claim") != "harness-ready":
         report.add(
             "CERT003",
             "error",
             rel,
-            "Bundled certification manifest claim must be candidate-only.",
-            "A production-ready claim is forbidden until a provider-specific external authority verifier is integrated.",
+            "Bundled certification manifest claim must be harness-ready.",
+            "Use harness-ready only after the repository-level harness contract and its current evidence pass.",
         )
     if payload.get("profile") != profile:
         report.add(
             "CERT003",
             "error",
             rel,
-            "Candidate-integrity profile does not match the invoked profile.",
+            "Harness certification profile does not match the invoked profile.",
             "Run the declared profile or update and re-evidence the manifest deliberately.",
         )
     repository_identity = payload.get("repository_identity")
@@ -4949,8 +4952,8 @@ def validate_certification(
             "CERT013",
             "error",
             rel,
-            "Candidate-integrity manifest lacks a concrete repository identity or deployment target ID.",
-            "Record stable repository and deployment-target identifiers in the manifest and every HMAC-consistent candidate record; these caller-supplied values do not authenticate production authority.",
+            "Harness certification manifest lacks a concrete repository identity or harness target ID.",
+            "Record stable repository and harness-target identifiers in the manifest and every HMAC-consistent evidence record; the target may identify a repository/CI scope when no deployment applies.",
         )
         return
     commit = payload.get("repository_commit")
@@ -4962,8 +4965,8 @@ def validate_certification(
             "CERT004",
             "error",
             rel,
-            "Candidate-integrity manifest is not bound to a full source commit object ID.",
-            "Record the source commit that directly precedes the candidate attestation overlay.",
+            "Harness certification manifest is not bound to a full source commit object ID.",
+            "Record the source commit that directly precedes the harness attestation overlay.",
         )
         return
     attestation_key, attestation_key_id, key_issue = load_external_attestation_key(
@@ -4978,17 +4981,30 @@ def validate_certification(
             "CERT012",
             "error",
             rel,
-            f"Candidate-integrity HMAC key is invalid: {key_issue}.",
+            f"Harness evidence-integrity HMAC key is invalid: {key_issue}.",
             "Supply an absolute, non-symlinked, owner-only key file outside the repository.",
         )
         return
-    if payload.get("environment") != "production":
+    manifest_environment = payload.get("environment")
+    if not substantive_certification_string(manifest_environment, 2):
         report.add(
             "CERT003",
             "error",
             rel,
-            "A candidate manifest for a requested production-readiness assessment must target the production environment.",
-            "Keep local or staging records scoped to their literal label; a production-scoped candidate assessment still ends with CERT015.",
+            "Harness certification environment is missing or non-substantive.",
+            "Name the repository, CI, staging, or production scope in which the harness evidence was observed.",
+        )
+    elif (
+        require_production_attestation
+        and isinstance(manifest_environment, str)
+        and manifest_environment.casefold() != "production"
+    ):
+        report.add(
+            "CERT003",
+            "error",
+            rel,
+            "Optional production attestation must target the production environment.",
+            "Use ordinary harness certification for repository or CI evidence, or provide a production-scoped manifest for the optional stricter profile.",
         )
     issued_at = parse_certification_instant(payload.get("issued_at"))
     expires_at = parse_certification_instant(payload.get("expires_at"))
@@ -5003,8 +5019,8 @@ def validate_certification(
             "CERT005",
             "error",
             rel,
-            "Candidate-manifest timestamps are invalid, future-issued, or expired.",
-            "Use UTC RFC3339 instants and issue a fresh bounded candidate manifest after rerunning the declared checks.",
+            "Harness-manifest timestamps are invalid, future-issued, or expired.",
+            "Use UTC RFC3339 instants and issue a fresh bounded manifest after rerunning the declared checks.",
         )
 
     maintenance = payload.get("maintenance")
@@ -5015,7 +5031,7 @@ def validate_certification(
             "CERT006",
             "error",
             rel,
-            "Maintenance contract does not exactly match the HMAC-consistent v2 candidate schema.",
+            "Maintenance contract does not exactly match the HMAC-consistent v2 harness schema.",
             "Declare command, pull-request/push/schedule triggers, max_age_hours, and evidence.",
         )
     else:
@@ -5026,7 +5042,7 @@ def validate_certification(
                 "error",
                 rel,
                 f"Maintenance max_age_hours must be between 1 and {MAX_CERTIFICATION_AGE_HOURS}.",
-                "Choose a bounded freshness window and schedule candidate-integrity revalidation within it.",
+                "Choose a bounded freshness window and schedule harness revalidation within it.",
             )
         else:
             max_age_hours = raw_age
@@ -5035,8 +5051,8 @@ def validate_certification(
                     "CERT005",
                     "error",
                     rel,
-                    "Candidate-manifest lifetime exceeds the declared maintenance freshness window.",
-                    "Expire the candidate manifest no later than max_age_hours after issuance.",
+                    "Harness-manifest lifetime exceeds the declared maintenance freshness window.",
+                    "Expire the harness manifest no later than max_age_hours after issuance.",
                 )
         triggers = maintenance.get("triggers")
         if not isinstance(triggers, list) or not {"pull_request", "push", "schedule"}.issubset(
@@ -5055,7 +5071,7 @@ def validate_certification(
                 "error",
                 rel,
                 "Maintenance command is missing or unresolved.",
-                "Record the exact repository-native convergence or candidate-integrity command.",
+                "Record the exact repository-native convergence or harness-certification command.",
             )
 
     evidence_root_value = payload.get("evidence_root")
@@ -5085,7 +5101,7 @@ def validate_certification(
             "error",
             relative_display(root, coverage_path),
             "Configured coverage matrix is missing or unsafe.",
-            "Restore the complete canonical inventory before evaluating the production-readiness blocker.",
+            "Restore the complete canonical inventory before certifying the repository harness.",
         )
         return
     try:
@@ -5097,7 +5113,7 @@ def validate_certification(
             "error",
             relative_display(root, coverage_path),
             f"Coverage matrix cannot be bound safely: {exc}.",
-            "Restore a regular UTF-8 matrix and rerun candidate-integrity validation.",
+            "Restore a regular UTF-8 matrix and rerun harness certification.",
         )
         return
     digest = payload.get("coverage_sha256")
@@ -5108,7 +5124,7 @@ def validate_certification(
             "error",
             rel,
             "coverage_sha256 does not match the configured coverage matrix.",
-            "Rerun every affected capability and bind the candidate manifest to the current matrix digest.",
+            "Rerun every affected capability and bind the harness manifest to the current matrix digest.",
         )
     rows, _, _, _ = coverage_table_rows(coverage_text)
     validate_coverage(
@@ -5117,6 +5133,20 @@ def validate_certification(
         coverage_path,
         require_canonical_rows=True,
     )
+    production_identity = normalize_coverage_identity(
+        "Release, deployment, and production actions require repository-local authority"
+    )
+    production_status = next(
+        (
+            parse_coverage_status(row.status_cell)[0]
+            for row in rows
+            if normalize_coverage_identity(row.identity) == production_identity
+        ),
+        None,
+    )
+    production_authority_required = (
+        require_production_attestation or production_status == "verified"
+    )
     allowed_overlay_paths, overlay_issues = certification_overlay_paths(
         root,
         certification_path,
@@ -5124,6 +5154,7 @@ def validate_certification(
         evidence_root,
         rows,
         payload,
+        include_production_authority_evidence=production_authority_required,
     )
     if overlay_issues:
         report.add(
@@ -5132,7 +5163,7 @@ def validate_certification(
             rel,
             "Attestation overlay references are not exact: "
             + "; ".join(overlay_issues[:3]),
-            "Use one regular HMAC-consistent v2 candidate JSON record per coverage row and only the named gate/authority candidate records.",
+            "Use one regular HMAC-consistent v2 evidence record per coverage row and only the named gate/authority records.",
         )
     git_issue = git_attestation_issue(
         root,
@@ -5146,26 +5177,31 @@ def validate_certification(
             "error",
             rel,
             f"Git source/attestation binding is invalid: {git_issue}.",
-            "Commit all source changes, then add one direct-child attestation commit containing exactly the candidate manifest, coverage, and referenced HMAC-consistent candidate records.",
+            "Commit all source changes, then add one direct-child attestation commit containing exactly the harness manifest, coverage, and referenced HMAC-consistent evidence records.",
         )
-    production_identity = normalize_coverage_identity(
-        "Release, deployment, and production actions require repository-local authority"
-    )
     for row in rows:
         status, _ = parse_coverage_status(row.status_cell)
         if status not in {"verified", "n/a"}:
             continue
         identity = normalize_coverage_identity(row.identity)
-        if identity == production_identity and status != "verified":
+        if (
+            require_production_attestation
+            and identity == production_identity
+            and status != "verified"
+        ):
             report.add(
                 "CERT009",
                 "error",
                 relative_display(root, coverage_path),
-                "The release/deployment/production authority capability cannot be N/A for a production-ready claim.",
-                "Exercise the project-specific authority, rollback, and audit path and mark it verified.",
+                "The release/deployment/production authority capability cannot be N/A when optional production attestation is required.",
+                "Exercise the project-specific authority, rollback, and audit path, or use ordinary harness certification without the optional production-attestation profile.",
             )
             continue
-        required_environment = "production" if identity == production_identity else None
+        required_environment = (
+            "production"
+            if require_production_attestation and identity == production_identity
+            else None
+        )
         evidence, issues = linked_certification_evidence(
             root,
             coverage_path,
@@ -5188,7 +5224,7 @@ def validate_certification(
                 "error",
                 relative_display(root, coverage_path),
                 f"Coverage row {row.line} has no valid fresh commit-bound evidence: {'; '.join(issues[:3])}.",
-                "Link its status cell to one matching HMAC-consistent v2 candidate record inside evidence_root.",
+                "Link its status cell to one matching HMAC-consistent v2 evidence record inside evidence_root.",
             )
 
     project_gate = payload.get("project_native_gate")
@@ -5240,7 +5276,20 @@ def validate_certification(
 
     authority = payload.get("production_authority")
     authority_keys = {"owner", "approval_evidence", "rollback_evidence"}
-    if (
+    if not production_authority_required:
+        if (
+            not isinstance(authority, dict)
+            or set(authority) != authority_keys
+            or any(authority.get(key) is not None for key in authority_keys)
+        ):
+            report.add(
+                "CERT011",
+                "error",
+                rel,
+                "A non-deployable harness must explicitly set every production_authority field to null.",
+                "Use null owner, approval_evidence, and rollback_evidence only when the canonical production capability has fresh justified N/A evidence.",
+            )
+    elif (
         not isinstance(authority, dict)
         or set(authority) != authority_keys
         or not isinstance(authority.get("owner"), str)
@@ -5269,7 +5318,9 @@ def validate_certification(
             now=now,
             not_after=evidence_not_after,
             max_age_hours=max_age_hours,
-            required_environment="production",
+            required_environment=(
+                "production" if require_production_attestation else None
+            ),
         )
         validate_named_certification_evidence(
             report,
@@ -5286,22 +5337,16 @@ def validate_certification(
             now=now,
             not_after=evidence_not_after,
             max_age_hours=max_age_hours,
-            required_environment="production",
+            required_environment=(
+                "production" if require_production_attestation else None
+            ),
         )
-    report.add(
-        "CERT015",
-        "error",
-        rel,
-        "External production authority verifier is unavailable; local HMAC records prove candidate integrity only.",
-        "Keep the claim candidate-only until a provider-specific, pre-provisioned asymmetric verifier independently validates repository identity, deployment target, approval, and rollback authority.",
-    )
-
-
 def certify_repository(
     root: Path,
     profile: str,
     expected_commit: str,
     attestation_key_file: str | Path | None,
+    require_production_attestation: bool = False,
 ) -> Report:
     report = audit_repository(root, profile, "certify")
     authorities = load_authorities(root, report)
@@ -5312,15 +5357,25 @@ def certify_repository(
         profile,
         expected_commit,
         attestation_key_file=attestation_key_file,
+        require_production_attestation=require_production_attestation,
     )
     if not any(item.severity in {"error", "warning"} for item in report.findings):
-        report.add(
-            "CERT015",
-            "error",
-            authorities["certification"],
-            "External production authority verifier is unavailable; local validation cannot issue a production-ready result.",
-            "Provision and integrate a provider-specific asymmetric production authority verifier before enabling certification success.",
-        )
+        if require_production_attestation:
+            report.add(
+                "CERT015",
+                "error",
+                authorities["certification"],
+                "Optional external production attestation was requested, but no provider verifier is configured.",
+                "Configure a provider-specific verifier before requiring independent production attestation; ordinary harness certification does not require this optional profile.",
+            )
+        else:
+            report.add(
+                "CERT000",
+                "info",
+                authorities["certification"],
+                "Harness-ready certification is current for the asserted source and attestation commits.",
+                "Keep the project-native pull-request, push, and scheduled maintenance gates active; relevant drift requires fresh evidence and re-certification.",
+            )
     return report.normalized()
 
 
@@ -6778,7 +6833,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     certify = subparsers.add_parser(
         "certify",
-        help="Candidate-integrity validation that always fails closed with CERT015 without an external production-authority verifier",
+        help="Commit-bound validation of the repository-level harness contract",
     )
     add_root_options(certify)
     certify.add_argument(
@@ -6789,7 +6844,12 @@ def build_parser() -> argparse.ArgumentParser:
     certify.add_argument(
         "--attestation-key-file",
         default=None,
-        help="Absolute owner-only HMAC key outside the repository, required only for candidate checks and never production authority",
+        help="Absolute owner-only HMAC key outside the repository for harness evidence integrity",
+    )
+    certify.add_argument(
+        "--require-production-attestation",
+        action="store_true",
+        help="Additionally require an optional provider-backed production attestation",
     )
 
     scaffold = subparsers.add_parser(
@@ -6864,6 +6924,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.profile,
                 args.commit,
                 args.attestation_key_file,
+                args.require_production_attestation,
             )
             print_report(report, args.format)
             summary = report.summary()

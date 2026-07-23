@@ -12,7 +12,8 @@ Map a change category to the minimum reliable proof. Use exact repository comman
 | Data or migration | <!-- TODO(harness): fixture/dry run --> | <!-- reconciliation/rollback check --> | Before/after counts or invariant | <!-- fallback --> | <!-- role/trigger --> |
 | CI or build system | <!-- TODO(harness): config validation --> | <!-- representative job --> | Expected job graph/artifact | <!-- fallback --> | <!-- role/trigger --> |
 | Security-sensitive boundary | <!-- TODO(harness): focused test/scan --> | <!-- threat-specific validation --> | Reproduction fails after fix | <!-- fallback --> | <!-- role/trigger --> |
-| Harness authority, candidate records, CI, release, or production boundary | <!-- TODO(harness): native focused candidate gate --> | <!-- bundled candidate-integrity check plus future provider-verifier check when implemented --> | Trusted source/direct-child attestation commits and HMAC-consistent v2 candidate records; any future production claim additionally needs provider-authenticated repository, target, approval, rollback, artifact, freshness, and revocation evidence | Fail closed with `CERT015`; do not emit or retain a production-ready claim | <!-- durable role plus every relevant change --> |
+| Repository harness authority, evidence records, and CI | <!-- TODO(harness): native focused certification gate --> | <!-- bundled harness certification check --> | Trusted source/direct-child attestation commits, all 31 coverage rows, and fresh HMAC-consistent v2 records | Fail closed on any harness error or warning; require `CERT000` for harness-ready | <!-- durable role plus every relevant change --> |
+| Optional production attestation | <!-- TODO(harness): provider verifier or N/A --> | `certify --require-production-attestation` when explicitly required | Provider-authenticated repository, production target, approval, rollback, artifact, freshness, and revocation evidence | Report `CERT015` when the explicitly requested provider verifier is unavailable; do not infer production readiness from harness-ready | <!-- production authority plus every relevant change --> |
 
 ## Rules
 
@@ -20,4 +21,4 @@ Map a change category to the minimum reliable proof. Use exact repository comman
 - Prefer a narrow deterministic check before an expensive broad suite.
 - Record environment assumptions and cleanup for stateful checks.
 - Treat flaky, unavailable, or untrusted checks as a harness gap rather than a pass.
-- Rebuild and recheck the candidate after every relevant change and on the explicitly authorized bounded schedule; an expired or mismatched candidate is a failure, not historical proof, and a locally valid candidate still ends in nonzero `CERT015`.
+- Rebuild and recheck harness certification after every relevant change and on the explicitly authorized bounded schedule; an expired or mismatched certification is a failure, not historical proof. Ordinary certification must recover to `CERT000`; production-attestation evidence is additionally invalidated when that optional profile is in use.

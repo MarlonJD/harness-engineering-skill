@@ -12,7 +12,7 @@ Use this rubric to diagnose capabilities, not to reward file count. Record evide
 | 3 — Enforced | CI, structural tests, schemas, or runtime checks prevent known drift. |
 | 4 — Self-maintaining | Scheduled or event-driven loops detect decay, propose repairs, and preserve evidence. |
 
-A future production-ready claim would be stricter than level 4: it would additionally require a trusted source/direct-child attestation commit binding, fresh provider-authenticated evidence per capability, exercised production approval and rollback authority, and a fail-closed project-native gate. The bundled verifier checks only HMAC-consistent candidate records and always returns nonzero `CERT015`; maturity scoring never implies production readiness.
+`harness-ready` is a bounded certification layered on this rubric, not a maturity score or a universal production claim. It requires the complete 31-row inventory, a trusted source/direct-child attestation commit binding, fresh HMAC-consistent evidence for every `verified` or justified `N/A` capability, and a fail-closed project-native gate. The bundled verifier returns `CERT000` when that repository-level contract passes. An explicitly requested production attestation is stricter: it additionally requires production-scoped, provider-authenticated repository, target, approval, rollback, artifact, freshness, and revocation evidence.
 
 ## Dimensions
 
@@ -53,4 +53,4 @@ Fix the earliest broken feedback loop before adding higher autonomy. Prefer this
 6. Automate maintenance.
 7. Expand autonomy within explicit authority.
 
-Treat missing production, real-device, release, or external approval evidence as a scoped gap, not as proof that ordinary local work failed. For any requested production-ready claim, however, every required external authority and production proof is a hard blocker and cannot be replaced by a local assertion, default value, caller-selected HMAC key, or justified `N/A`. The current bundle reports that blocker as `CERT015`.
+Treat missing production, real-device, release, or external approval evidence as a scoped gap, not as proof that ordinary local work or harness-ready certification failed. A fresh justified `N/A` is valid for an inapplicable coverage row, including the production-authority row of a non-deployable repository. When `--require-production-attestation` is explicitly requested, every required production authority and proof becomes a hard blocker and cannot be replaced by a local assertion, default value, caller-selected HMAC key, or `N/A`; the current bundle reports an unavailable provider verifier as `CERT015`.

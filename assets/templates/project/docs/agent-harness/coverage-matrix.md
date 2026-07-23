@@ -4,10 +4,10 @@ Use this matrix to prove that the repository implements every applicable harness
 
 ## Status contract
 
-- `verified`: the artifact and behavior were exercised with recorded evidence. For bundled candidate-integrity checks, link the status cell to exactly one fresh HMAC-consistent v2 candidate record bound to the source commit, repository identity, and deployment-target identity. This is not external authentication.
+- `verified`: the artifact and behavior were exercised with recorded evidence. For bundled harness-certification checks, link the status cell to exactly one fresh HMAC-consistent v2 evidence record bound to the source commit, repository identity, and stable harness evaluation target. This is not external authentication.
 - `candidate`: the proposed implementation exists but has not been exercised.
 - `blocked`: a named dependency or authority prevents completion.
-- `N/A`: the capability is genuinely irrelevant, with a written reason. For bundled candidate-integrity checks, link the status cell to exactly one fresh HMAC-consistent v2 candidate applicability record.
+- `N/A`: the capability is genuinely irrelevant, with a written reason. For bundled harness-certification checks, link the status cell to exactly one fresh HMAC-consistent v2 applicability record.
 
 ## Coverage
 
@@ -30,7 +30,7 @@ Use this matrix to prove that the repository implements every applicable harness
 | Entropy and technical debt are continuously controlled | [`entropy-cleanup-checklist.md`](entropy-cleanup-checklist.md) and [`../exec-plans/tech-debt-tracker.md`](../exec-plans/tech-debt-tracker.md) | Dated sweep evidence and bounded follow-up | <!-- TODO(harness) --> |
 | Autonomy increases only after test, review, recovery, and escalation loops exist | [`operating-loop.md`](operating-loop.md), [`registry.md`](registry.md), and [`output-contract.md`](output-contract.md) | Evidence for the granted level and explicitly unavailable higher levels | <!-- TODO(harness) --> |
 | Merge throughput policy matches project risk | CI/review policy and [`../SECURITY.md`](../SECURITY.md)/[`../RELIABILITY.md`](../RELIABILITY.md) | Project-specific gate rationale; no copied low-blocking default | <!-- TODO(harness) --> |
-| Release, deployment, and production actions require repository-local authority | [`operating-loop.md`](operating-loop.md), [`output-contract.md`](output-contract.md), and approval policy | Explicit provider-authenticated authority, gates, rollback, and audit evidence; otherwise blocked. Use N/A only when the capability is genuinely irrelevant, never to bypass a requested production-ready claim or `CERT015` | <!-- TODO(harness) --> |
+| Release, deployment, and production actions require repository-local authority | [`operating-loop.md`](operating-loop.md), [`output-contract.md`](output-contract.md), and approval policy | An exercised repository-local gate that denies unauthorized actions, plus documented approval, escalation, and rollback paths; or a fresh justified N/A when the repository has no such action. When `--require-production-attestation` is requested, additionally require provider-authenticated authority, rollback, and audit evidence and do not use N/A | <!-- TODO(harness) --> |
 | Repository-specific OpenAI examples are treated as options, not universal mandates | Case-study decision ledger below and architectural decisions | Every listed choice has its own status and project-specific reason | <!-- TODO(harness) --> |
 
 ## Case-study decision ledger
