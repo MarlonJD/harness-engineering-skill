@@ -26,8 +26,12 @@ Run this loop only after an explicit repository-scoped request or an already-aut
 8. Review the diff, test coverage, generated artifacts, failure modes, and recovery path.
 9. Request additional agent or human review when available and justified; address findings and repeat verification.
 10. Update the ExecPlan, architecture, product knowledge, registry, debt, or enforcement rule that changed.
-11. Refresh affected HMAC-consistent v2 certification records and rerun the project-native harness gate for a new trusted source/direct-child attestation pair, or invalidate `harness-ready`. Require a fresh `CERT000` result. If `--require-production-attestation` is explicitly in use, separately refresh its provider evidence or report `CERT015`; local maintenance cannot invent provider authority.
+11. Run the project-native harness gate. Refresh HMAC-consistent v2 records and require a new trusted source/direct-child `CERT000` result only when the optional strict attestation profile is enabled. Otherwise, leave strict attestation absent or invalid. If `--require-production-attestation` is explicitly in use, separately refresh its provider evidence or report `CERT015`; local maintenance cannot invent provider authority.
 12. Hand off with literal evidence labels from the output contract.
+
+## AI-runtime loop (when applicable)
+
+When the repository invokes a model or agent runtime, read [`model-and-agent-runtime.md`](model-and-agent-runtime.md) and [`evals.md`](evals.md) before changing prompts, tools, orchestration, or state handling. Establish a representative baseline, make one bounded change, rerun the same evaluation set, inspect tool/state evidence, and compare quality, evidence completeness, latency, tokens, and cost. Keep direct calls, Programmatic Tool Calling, and multi-agent routing distinct; do not select a route merely because it is available.
 
 ## Review policy decision
 
@@ -46,7 +50,7 @@ OpenAI's case study used local and cloud agent reviewers in a loop until they we
 | Repeated review finding | Fix the current change and inspect nearby occurrences | Promote a stable rule into docs, a test, linter, or structural check |
 | User-facing defect | Capture a reproducible path and validate the repair | Add acceptance evidence and update product or reliability knowledge |
 | Agent cannot proceed | Identify the missing tool, context, signal, or permission | Improve the registry/harness or escalate the judgment boundary |
-| Harness gate or maintenance failure | Repair only safe explicitly authorized drift, refresh affected certification records, and keep harness-ready invalid until every local gate passes and `CERT000` returns; preserve `CERT015` only for an explicitly requested unavailable production verifier | Add the reproducer, update coverage, and preserve the invalidation/recovery trace |
+| Harness gate or maintenance failure | Repair only safe explicitly authorized drift and keep the native gate failed until it passes; refresh strict certification records and require `CERT000` only when that optional profile is enabled; preserve `CERT015` only for an explicitly requested unavailable production verifier | Add the reproducer, update coverage, and preserve the invalidation/recovery trace |
 
 ## Escalation boundaries
 

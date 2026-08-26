@@ -4,10 +4,10 @@ Use this matrix to prove that the repository implements every applicable harness
 
 ## Status contract
 
-- `verified`: the artifact and behavior were exercised with recorded evidence. For bundled harness-certification checks, link the status cell to exactly one fresh HMAC-consistent v2 evidence record bound to the source commit, repository identity, and stable harness evaluation target. This is not external authentication.
+- `verified`: the artifact and behavior were exercised with recorded evidence. When the optional strict attestation profile is enabled, link the status cell to exactly one fresh HMAC-consistent v2 evidence record bound to the source commit, repository identity, and stable harness evaluation target. This is not external authentication.
 - `candidate`: the proposed implementation exists but has not been exercised.
 - `blocked`: a named dependency or authority prevents completion.
-- `N/A`: the capability is genuinely irrelevant, with a written reason. For bundled harness-certification checks, link the status cell to exactly one fresh HMAC-consistent v2 applicability record.
+- `N/A`: the capability is genuinely irrelevant, with a written reason. When strict attestation is enabled, link the status cell to exactly one fresh HMAC-consistent v2 applicability record.
 
 ## Coverage
 
@@ -53,3 +53,7 @@ These rows prevent OpenAI's implementation choices from being either copied blin
 | Automated merge and agent-authored release tooling | CI/review policy, release tooling, and [`operating-loop.md`](operating-loop.md) | Project-specific automation and gate rationale; do not infer deployment or production authority | <!-- TODO(harness) --> |
 
 Review this matrix after major architecture, CI, runtime, or agent-workflow changes. Do not mark the harness complete while an applicable row is missing evidence.
+
+## Optional AI-runtime extension
+
+When the repository invokes a model or agent runtime, use [`model-and-agent-runtime.md`](model-and-agent-runtime.md) and [`evals.md`](evals.md) as additional authorities. Keep these checks outside the canonical 31-row source/case-study inventory so a non-AI repository can record a justified `N/A` without pretending to exercise model behavior. The extension should cover model/provider/snapshot identity, reasoning and state settings, tool/MCP permissions, prompt-injection and data boundaries, PTC/multi-agent routing, representative task evals, and quality/latency/token/cost evidence.

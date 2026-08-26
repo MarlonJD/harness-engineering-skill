@@ -32,6 +32,10 @@ Prefer per-task or per-worktree isolation when concurrent agents can collide. Do
 
 Do not install OpenAI's example observability stack by default. Reuse the project's telemetry and add only the query paths an agent needs to diagnose and verify relevant behavior.
 
+## Evaluate model and tool changes
+
+When a repository invokes an AI runtime, keep a small deterministic smoke evaluation and a broader representative suite. Compare one bounded change at a time on task success, required evidence, tool behavior, recovery, latency, tokens, cached tokens, and cost. Record the model/provider/snapshot and reasoning settings. Use Programmatic Tool Calling only for bounded deterministic processing, and use multi-agent routing only when work divides into independent branches with explicit synthesis, shared-state, retry, and approval boundaries. Keep these controls `N/A` for non-AI repositories.
+
 ## Capture human judgment
 
 After a review correction, incident, or user-facing failure, classify the lesson:
@@ -72,8 +76,8 @@ Increase agent responsibility only when the previous level is observable and rec
 
 High throughput does not justify weakening a gate when failures are expensive, irreversible, regulated, or difficult to detect.
 
-## Maintain harness certification and block unsupported production claims
+## Keep optional certification disabled by default and block unsupported production claims
 
-Installing this skill creates no watcher, CI job, schedule, or repair loop. After an explicit repository-scoped `$apply-harness-engineering` invocation, implement a project-native harness gate and run it manually before task completion by default. Do not create or modify hosted CI workflow files unless the user explicitly requests CI automation; only then may the gate run on pull requests, pushes, and a bounded schedule. Bind HMAC-consistent v2 evidence records and the `harness-ready` manifest to source commit `S`, and verify them only from its clean direct-child attestation commit `A`. Expire certification within seven days or sooner, and invalidate it on the next check when `HEAD` moves past `A` or a required command, coverage row, record, or declared applicability or authority input changes or fails. These local records support bounded repository-harness certification but do not authenticate production authority. When all ordinary checks pass, the bundled verifier returns `CERT000`.
+Installing this skill creates no watcher, CI job, schedule, or repair loop. After an explicit repository-scoped `$apply-harness-engineering` invocation, implement a project-native harness gate and run it manually before task completion by default. Certification is not used by default: do not create HMAC evidence, a certification manifest, or an attestation overlay unless the user or repository policy explicitly requests it. Do not create or modify hosted CI workflow files unless the user explicitly requests CI automation; only then may the gate run on pull requests, pushes, and a bounded schedule. When the optional strict overlay is enabled, bind it to source commit `S` and verify it only from its clean direct-child attestation commit `A`. Expire strict attestation within seven days or sooner, and invalidate it on the next check when `HEAD` moves past `A` or a required command, coverage row, record, or declared applicability or authority input changes or fails. These local records support bounded repository-harness attestation but do not authenticate production authority. When strict checks pass, the bundled verifier returns `CERT000`.
 
 Only an explicitly authorized repository-native trigger may repair safe repository-local drift within existing authority. It must fail closed and escalate when repair requires secrets, destructive actions, external writes, merge, release, deployment, production access, or product judgment. Refreshing and rechecking the evidence can restore `harness-ready` and `CERT000`; it cannot establish production authority. Add `--require-production-attestation` only when that stricter result is explicitly required. The current bundle emits `CERT015` for that request because no provider verifier is configured; a successful implementation must use an independently provisioned trust root and verify repository identity, production target, issuer, approval, rollback, artifact provenance, freshness, and revocation.

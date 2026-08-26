@@ -40,6 +40,10 @@ Use this rubric to diagnose capabilities, not to reward file count. Record evide
 7. **Safe autonomy and recovery**
    - Check whether agents can validate their own work, obtain review, handle failures, retry safely, and escalate judgment calls.
    - Keep destructive, production, release, merge, and external-write authority separate from local implementation capability.
+8. **AI runtime and evaluation (when applicable)**
+   - Check whether the model/provider/snapshot, reasoning settings, state/replay, compaction, prompt caching, output schemas, and tool/MCP permissions are discoverable.
+   - Check whether representative tasks measure success, evidence completeness, tool behavior, recovery, latency, tokens, and cost before a model or orchestration change is promoted.
+   - Mark this dimension `N/A` for repositories with no AI runtime; do not manufacture model evidence.
 
 ## Prioritization rule
 
@@ -53,4 +57,4 @@ Fix the earliest broken feedback loop before adding higher autonomy. Prefer this
 6. Automate maintenance.
 7. Expand autonomy within explicit authority.
 
-Treat missing production, real-device, release, or external approval evidence as a scoped gap, not as proof that ordinary local work or harness-ready certification failed. A fresh justified `N/A` is valid for an inapplicable coverage row, including the production-authority row of a non-deployable repository. When `--require-production-attestation` is explicitly requested, every required production authority and proof becomes a hard blocker and cannot be replaced by a local assertion, default value, caller-selected HMAC key, or `N/A`; the current bundle reports an unavailable provider verifier as `CERT015`.
+Treat missing production, real-device, release, or external approval evidence as a scoped gap, not as proof that ordinary local work or native harness adoption failed. A fresh justified `N/A` is valid for an inapplicable coverage row, including the production-authority row of a non-deployable repository. When strict `--require-production-attestation` is explicitly requested, every required production authority and proof becomes a hard blocker and cannot be replaced by a local assertion, default value, caller-selected HMAC key, or `N/A`; the current bundle reports an unavailable provider verifier as `CERT015`.

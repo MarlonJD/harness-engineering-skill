@@ -60,6 +60,10 @@ MARKDOWN_RESULT_BUDGET_SENTINEL = "\ue107HARNESS_LINK_RESULT_LIMIT\ue108"
 MARKDOWN_PARSE_BUDGET_EXCEEDED = -2
 CONFIG_REL = "docs/agent-harness/config.json"
 CERTIFICATION_REL = "docs/agent-harness/certification.json"
+CERTIFICATION_OPTIONAL_FILES = (
+    "docs/agent-harness/certification.md",
+    CERTIFICATION_REL,
+)
 CODEX_PROJECT_CONFIG_REL = ".codex/config.toml"
 DEFAULT_PROJECT_DOC_MAX_BYTES = 32 * 1024
 MAX_CERTIFICATION_AGE_HOURS = 168
@@ -88,12 +92,12 @@ STANDARD_FILES = (
     "docs/agent-harness/registry.md",
     "docs/agent-harness/operating-loop.md",
     "docs/agent-harness/environment-contract.md",
+    "docs/agent-harness/model-and-agent-runtime.md",
+    "docs/agent-harness/evals.md",
     "docs/agent-harness/output-contract.md",
     "docs/agent-harness/verification-matrix.md",
     "docs/agent-harness/entropy-cleanup-checklist.md",
     "docs/agent-harness/coverage-matrix.md",
-    "docs/agent-harness/certification.md",
-    CERTIFICATION_REL,
     "docs/agent-harness/evidence/.gitkeep",
     "docs/exec-plans/index.md",
     "docs/exec-plans/plan-template.md",
@@ -128,8 +132,15 @@ DEFAULT_AUTHORITIES = {
     "environment": "docs/agent-harness/environment-contract.md",
     "verification": "docs/agent-harness/verification-matrix.md",
     "coverage": "docs/agent-harness/coverage-matrix.md",
+}
+
+# Certification is intentionally outside the default authority map. A target
+# repository opts in by explicitly mapping this authority (or by invoking the
+# read-only `certify` command against the bundled default path).
+OPTIONAL_AUTHORITIES = {
     "certification": CERTIFICATION_REL,
 }
+KNOWN_AUTHORITIES = {**DEFAULT_AUTHORITIES, **OPTIONAL_AUTHORITIES}
 
 ROUTER_CANDIDATES = (
     "AGENTS.md",
@@ -152,12 +163,12 @@ HARNESS_INDEX_TARGETS = (
     "docs/agent-harness/registry.md",
     "docs/agent-harness/operating-loop.md",
     "docs/agent-harness/environment-contract.md",
+    "docs/agent-harness/model-and-agent-runtime.md",
+    "docs/agent-harness/evals.md",
     "docs/agent-harness/output-contract.md",
     "docs/agent-harness/verification-matrix.md",
     "docs/agent-harness/entropy-cleanup-checklist.md",
     "docs/agent-harness/coverage-matrix.md",
-    "docs/agent-harness/certification.md",
-    CERTIFICATION_REL,
     "docs/exec-plans/index.md",
     "docs/exec-plans/tech-debt-tracker.md",
 )
@@ -428,14 +439,23 @@ class Report:
         }
 
 
-def files_for_profile(profile: str) -> tuple[str, ...]:
+def files_for_profile(
+    profile: str,
+    *,
+    include_certification: bool = False,
+) -> tuple[str, ...]:
+    files: tuple[str, ...]
     if profile == "adaptive":
-        return ()
-    if profile == "standard":
-        return STANDARD_FILES
-    if profile == "full":
-        return STANDARD_FILES + FULL_ONLY_FILES
-    raise SafeRefusal(f"Unknown profile: {profile}")
+        files = ()
+    elif profile == "standard":
+        files = STANDARD_FILES
+    elif profile == "full":
+        files = STANDARD_FILES + FULL_ONLY_FILES
+    else:
+        raise SafeRefusal(f"Unknown profile: {profile}")
+    if include_certification:
+        files += CERTIFICATION_OPTIONAL_FILES
+    return files
 
 
 def scaffold_comment_fingerprints(text: str) -> set[str]:
@@ -1027,13 +1047,13 @@ def load_authorities(root: Path, report: Report) -> dict[str, str]:
                 "Remove invalid entries or provide a safe repository-relative path.",
             )
             continue
-        if key not in DEFAULT_AUTHORITIES:
+        if key not in KNOWN_AUTHORITIES:
             report.add(
                 "CONFIG004",
                 "error",
                 CONFIG_REL,
                 f"Unknown authority key {key!r}.",
-                f"Use one of: {', '.join(sorted(DEFAULT_AUTHORITIES))}.",
+                f"Use one of: {', '.join(sorted(KNOWN_AUTHORITIES))}.",
             )
             continue
         if key == "instructions" and value != "AGENTS.md":
@@ -3091,6 +3111,7 @@ def markdown_files(root: Path, report: Report | None = None) -> Iterable[Path]:
         "build",
         "target",
     }
+    package_fragment_dir = (SKILL_ROOT / "assets" / "templates" / "fragments").resolve()
     walk_entries = 0
     markdown_count = 0
     path_bytes = 0
@@ -3183,7 +3204,9 @@ def markdown_files(root: Path, report: Report | None = None) -> Iterable[Path]:
             if stat.S_ISLNK(metadata.st_mode):
                 continue
             if stat.S_ISDIR(metadata.st_mode):
-                if name not in excluded:
+                if name not in excluded and not (
+                    root == SKILL_ROOT and path.resolve(strict=False) == package_fragment_dir
+                ):
                     directories.append(path)
                 continue
             if (
@@ -4862,7 +4885,9 @@ def validate_certification(
 ) -> None:
     root = resolve_safe_directory(root)
     now = now or datetime.now(timezone.utc)
-    certification_path = safe_target(root, authorities["certification"])
+    certification_path = safe_target(
+        root, authorities.get("certification", CERTIFICATION_REL)
+    )
     rel = relative_display(root, certification_path)
     if not certification_path.is_file() or certification_path.is_symlink():
         report.add(
@@ -5374,7 +5399,7 @@ def certify_repository(
             report.add(
                 "CERT015",
                 "error",
-                authorities["certification"],
+                authorities.get("certification", CERTIFICATION_REL),
                 "Optional external production attestation was requested, but no provider verifier is configured.",
                 "Configure a provider-specific verifier before requiring independent production attestation; ordinary harness certification does not require this optional profile.",
             )
@@ -5382,7 +5407,7 @@ def certify_repository(
             report.add(
                 "CERT000",
                 "info",
-                authorities["certification"],
+                authorities.get("certification", CERTIFICATION_REL),
                 "Harness-ready certification is current for the asserted source and attestation commits.",
                 "Keep the declared manual or automated maintenance path usable; relevant drift requires fresh evidence and re-certification.",
             )
@@ -6216,7 +6241,7 @@ def detect_stale_authority_links(
 ) -> None:
     changed = {
         key: default
-        for key, default in DEFAULT_AUTHORITIES.items()
+        for key, default in KNOWN_AUTHORITIES.items()
         if authorities.get(key, default) != default
     }
     if not changed:
@@ -6473,6 +6498,8 @@ def discover_capabilities(
         "tests",
         "test",
         "spec",
+        "scripts/tests",
+        "scripts/harness.py",
         "package.json",
         "pyproject.toml",
         "Makefile",
@@ -6665,10 +6692,17 @@ def audit_repository(root: Path, profile: str, command: str) -> Report:
     return report.normalized()
 
 
-def scaffold_preview(root: Path, profile: str) -> Report:
+def scaffold_preview(
+    root: Path,
+    profile: str,
+    *,
+    include_certification: bool = False,
+) -> Report:
     root = resolve_safe_directory(root)
     report = Report(command="scaffold", root=str(root))
-    for rel in files_for_profile(profile):
+    for rel in files_for_profile(
+        profile, include_certification=include_certification
+    ):
         source = TEMPLATE_ROOT / rel
         target = safe_target(root, rel)
         if not source.is_file():
@@ -6867,6 +6901,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_root_options(scaffold, include_profile=False)
     scaffold.add_argument("--profile", choices=("standard", "full"), required=True)
+    scaffold.add_argument(
+        "--with-certification",
+        "--enable-certification",
+        dest="with_certification",
+        action="store_true",
+        help="Include the optional strict-certification files; disabled by default",
+    )
 
     validate = subparsers.add_parser(
         "validate-plan", help="Read-only structural or completion validation for one plan"
@@ -6940,7 +6981,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             summary = report.summary()
             return 1 if summary["errors"] or summary["warnings"] else 0
         if args.command == "scaffold":
-            report = scaffold_preview(root, args.profile)
+            report = scaffold_preview(
+                root,
+                args.profile,
+                include_certification=args.with_certification,
+            )
             print_report(report, args.format)
             return 1 if report.summary()["errors"] else 0
         if args.command == "validate-plan":

@@ -21,11 +21,13 @@ Keep one authoritative home for each kind of knowledge. Link from indexes instea
 | `docs/agent-harness/config.json` | Paths to adopted canonical authorities | An authority is created, moved, or intentionally mapped to an equivalent |
 | `docs/agent-harness/operating-loop.md` | Human/agent responsibilities, review loop, recovery, and escalation | The development or approval workflow changes |
 | `docs/agent-harness/environment-contract.md` | Isolation, lifecycle commands, runtime signals, and cleanup | Local runtime or observability behavior changes |
+| `docs/agent-harness/model-and-agent-runtime.md` | Optional model/provider, state, compaction, tool/MCP, safety, and direct/PTC/multi-agent contract | An AI runtime, tool catalog, state strategy, or approval boundary changes |
+| `docs/agent-harness/evals.md` | Optional representative task baselines and model/orchestration comparison evidence | A prompt, model, reasoning setting, tool, orchestration, or eval dataset changes |
 | `docs/agent-harness/output-contract.md` | Completion evidence and handoff language | Review or release evidence requirements change |
 | `docs/agent-harness/verification-matrix.md` | Requirement-to-check-to-evidence mapping | A surface, risk, or verification path changes |
 | `docs/agent-harness/entropy-cleanup-checklist.md` | Recurring drift checks and escalation rules | A recurring anti-pattern or cleanup loop changes |
 | `docs/agent-harness/coverage-matrix.md` | Source-principle-to-artifact-to-evidence traceability | A harness capability is added, removed, or reclassified |
-| `docs/agent-harness/certification.md` | Repository-specific harness-ready convergence, invalidation, and optional production-attestation boundary | The native gate, CI triggers, repair authority, evidence profile, or provider-verifier boundary changes |
+| `docs/agent-harness/certification.md` | Optional strict harness-ready convergence, invalidation, and optional production-attestation boundary | The native gate, CI triggers, repair authority, evidence profile, or provider-verifier boundary changes |
 | `docs/agent-harness/certification.json` | Source-commit-, repository-, evaluation-target-, environment-, coverage-, and freshness-bound `harness-ready` manifest carried in a direct-child attestation commit | Any bound commit, identity, record, coverage digest, applicability decision, or freshness window changes |
 | `docs/agent-harness/evidence/` | HMAC-consistent v2 harness observation and applicability records referenced by coverage and the manifest; not externally authenticated production proof | A capability is exercised, reclassified, invalidated, or refreshed |
 
@@ -39,7 +41,7 @@ Keep one authoritative home for each kind of knowledge. Link from indexes instea
 - Record `last verified` only when a person or command can actually refresh it.
 - Mark generated documents with their source and regeneration command. Do not hand-edit generated content.
 - Use `N/A` with a reason for intentionally absent surfaces; do not leave unexplained empty sections.
-- Treat every harness-ready manifest as expiring state, not durable truth. Bind HMAC-consistent v2 records and the manifest to source commit `S`, bind verification to clean direct-child attestation commit `A`, and keep records under the configured repository evidence root. Any later commit invalidates `A`. Complete, current ordinary certification returns `CERT000`; the records remain local integrity evidence rather than provider-authenticated production proof. Emit `CERT015` only when `--require-production-attestation` was explicitly requested and its provider verifier is unavailable.
+- Treat certification as disabled by default. A strict harness-ready manifest, when explicitly enabled, is optional expiring state rather than durable truth. Bind HMAC-consistent v2 records and the manifest to source commit `S`, bind verification to clean direct-child attestation commit `A`, and keep records under the configured repository evidence root. Any later commit invalidates `A`. Complete, current strict attestation returns `CERT000`; the records remain local integrity evidence rather than provider-authenticated production proof. Emit `CERT015` only when `--require-production-attestation` was explicitly requested and its provider verifier is unavailable.
 - Treat the installed skill as external tooling, not a repository lifecycle service. Installation alone creates no repository files, CI gate, scheduled invalidation, evidence, certificate, or repair authority.
 
 ## Change rules

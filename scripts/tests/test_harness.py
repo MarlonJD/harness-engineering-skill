@@ -572,6 +572,51 @@ class HarnessTests(unittest.TestCase):
             full_report.actions,
         )
 
+    def test_certification_is_disabled_and_not_scaffolded_by_default(self) -> None:
+        temporary, root = self.make_root()
+        self.addCleanup(temporary.cleanup)
+
+        self.assertNotIn("docs/agent-harness/certification.md", harness.STANDARD_FILES)
+        self.assertNotIn(harness.CERTIFICATION_REL, harness.STANDARD_FILES)
+
+        default_report = harness.scaffold_preview(root, "standard")
+        default_paths = {item["path"] for item in default_report.actions}
+        self.assertNotIn("docs/agent-harness/certification.md", default_paths)
+        self.assertNotIn(harness.CERTIFICATION_REL, default_paths)
+
+        opted_in_report = harness.scaffold_preview(
+            root,
+            "standard",
+            include_certification=True,
+        )
+        opted_in_actions = {
+            item["path"]: item["action"] for item in opted_in_report.actions
+        }
+        self.assertEqual(
+            "would-create",
+            opted_in_actions["docs/agent-harness/certification.md"],
+        )
+        self.assertEqual(
+            "would-create",
+            opted_in_actions[harness.CERTIFICATION_REL],
+        )
+
+        config = json.loads(
+            (
+                harness.TEMPLATE_ROOT
+                / "docs/agent-harness/config.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertNotIn("certification", config["authorities"])
+
+    def test_default_authority_map_does_not_require_certification(self) -> None:
+        temporary, root = self.make_root()
+        self.addCleanup(temporary.cleanup)
+        report = harness.Report(command="audit", root=str(root))
+        authorities = harness.load_authorities(root, report)
+        self.assertNotIn("certification", authorities)
+        self.assertNotIn("certification", harness.DEFAULT_AUTHORITIES)
+
     def test_scaffold_rejects_broken_final_symlink(self) -> None:
         temporary, root = self.make_root()
         self.addCleanup(temporary.cleanup)
@@ -3378,11 +3423,40 @@ _None._
             skill_text,
         )
         forbidden = {"__pycache__", ".DS_Store"}
-        for path in harness.SKILL_ROOT.rglob("*"):
+        git_listing = subprocess.run(
+            ["git", "-C", str(harness.SKILL_ROOT), "ls-files", "-z"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=10,
+        )
+        if git_listing.returncode == 0:
+            candidates = [
+                harness.SKILL_ROOT / Path(raw)
+                for raw in git_listing.stdout.decode("utf-8").split("\0")
+                if raw
+            ]
+        else:
+            candidates = [
+                path
+                for path in harness.SKILL_ROOT.rglob("*")
+                if not any(
+                    part in forbidden
+                    for part in path.relative_to(harness.SKILL_ROOT).parts
+                )
+            ]
+        for path in candidates:
             rel = path.relative_to(harness.SKILL_ROOT)
+            self.assertTrue(path.exists(), rel.as_posix())
             self.assertFalse(path.is_symlink(), rel.as_posix())
             self.assertFalse(any(part in forbidden for part in rel.parts), rel.as_posix())
             self.assertNotIn(path.suffix.casefold(), {".pyc", ".pyo"})
+
+    def test_package_check_ignores_target_repository_fragments(self) -> None:
+        result = self.run_cli("check", "--root", str(harness.SKILL_ROOT))
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertNotIn("LINK001", result.stdout)
 
     def test_adjacent_release_zip_matches_source_tree(self) -> None:
         archive = harness.SKILL_ROOT.with_suffix(".zip")

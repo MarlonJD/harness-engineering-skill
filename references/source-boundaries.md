@@ -7,6 +7,7 @@ Use these sources to distinguish transferable harness principles from repository
 - OpenAI, [Harness engineering: leveraging Codex in an agent-first world](https://openai.com/index/harness-engineering/) (11 February 2026). Use this as the case study for agent legibility, repository knowledge, mechanical boundaries, feedback loops, and entropy control.
 - OpenAI Cookbook, [Using PLANS.md for multi-hour problem solving](https://developers.openai.com/cookbook/articles/codex_exec_plans) (7 October 2025). Use this as the source for ExecPlan content and living-document behavior.
 - Current Codex documentation, [AGENTS.md guidance](https://learn.chatgpt.com/docs/agent-configuration/agents-md), [advanced configuration](https://learn.chatgpt.com/docs/config-file/config-advanced), and [Build skills](https://learn.chatgpt.com/docs/build-skills). Use current product docs for Codex loading, scope, and skill behavior.
+- Current OpenAI model guidance, [GPT-5.5](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-5.5) and [GPT-5.6](https://developers.openai.com/api/docs/guides/latest-model), applies only when a target repository invokes an OpenAI model or agent runtime.
 
 ## Transferable principles
 
@@ -19,6 +20,7 @@ Use these sources to distinguish transferable harness principles from repository
 - Convert failures and human judgment into durable docs, tests, tools, or tracked debt.
 - Control documentation and code entropy continuously in small increments.
 - Expand autonomy only after feedback and recovery loops are observable.
+- For an applicable AI runtime, make model state, tool permissions, output schemas, evaluation baselines, and quality/cost/latency tradeoffs observable; keep provider-specific features optional.
 
 The Cookbook's sample contract also says to commit frequently while executing a plan. Treat that as authority-gated workflow advice, not permission created by the ExecPlan format; current user and repository Git instructions control whether a commit may be made.
 
@@ -32,6 +34,7 @@ The Cookbook's sample contract also says to commit frequently while executing a 
 - Reimplementing dependencies locally.
 - Scheduled documentation-gardening or quality-scoring agents that open repair pull requests.
 - Minimally blocking merge gates, automated merge, and agent-authored release tooling.
+- The skill's 31-row HMAC attestation and `CERT000` result are optional governance extensions, not requirements stated by the Harness Engineering case study.
 
 Require a repository-specific decision and evidence for each applicable capability. Record an explicit `N/A` or `blocked` reason rather than silently omitting it.
 
