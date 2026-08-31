@@ -419,6 +419,13 @@ class HarnessTests(unittest.TestCase):
                 "active",
                 "--completion",
             ),
+            (
+                "simplify",
+                "--preview",
+                "--root",
+                str(root),
+                "--allow-non-git",
+            ),
         )
         for command in commands:
             self.run_cli(*command)
@@ -620,6 +627,117 @@ class HarnessTests(unittest.TestCase):
                 "scaffold", "--profile", profile, "--allow-non-git"
             )
             self.assertEqual(2, result.returncode, profile)
+
+    def test_cli_version_reports_the_package_authority(self) -> None:
+        result = self.run_cli("--version")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("harness.py 0.2.1", result.stdout.strip())
+        self.assertEqual("0.2.1", harness.package_version())
+
+    def test_simplify_requires_explicit_preview_without_mutation(self) -> None:
+        temporary, root = self.make_root()
+        self.addCleanup(temporary.cleanup)
+        put(root, "AGENTS.md", "# Guide\n")
+        before = tree_fingerprint(root)
+        result = self.run_cli(
+            "simplify",
+            "--root",
+            str(root),
+            "--allow-non-git",
+            "--format",
+            "json",
+        )
+        self.assertEqual(2, result.returncode)
+        self.assertEqual("CLI000", json.loads(result.stdout)["findings"][0]["id"])
+        self.assertEqual(before, tree_fingerprint(root))
+
+    def test_simplify_preview_reports_only_concrete_review_candidates(self) -> None:
+        temporary, root = self.make_root()
+        self.addCleanup(temporary.cleanup)
+        put(root, "ARCHITECTURE.md", "# Legacy architecture\n")
+        put(root, "docs/architecture.md", "# Canonical architecture\n")
+        put(
+            root,
+            harness.CONFIG_REL,
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "authorities": {"architecture": "docs/architecture.md"},
+                }
+            ),
+        )
+        put(root, "docs/QUALITY_SCORE.md", "# Legacy scorecard\n")
+        put(root, "docs/agent-harness/evidence/run.jsonl", "{}\n")
+        put(root, "docs/exec-plans/index.md", "# Plans\n")
+        put(root, "docs/exec-plans/active/shared.md", "# Active\n")
+        put(root, "docs/exec-plans/completed/shared.md", "# Completed\n")
+        put(
+            root,
+            "docs/legacy-plan.md",
+            "# Legacy plan\n\n Semantic-Review: reviewer=agent; reviewed-at=2026-01-01 00:00Z\n",
+        )
+        before = tree_fingerprint(root)
+
+        result = self.run_cli(
+            "simplify",
+            "--preview",
+            "--root",
+            str(root),
+            "--allow-non-git",
+            "--format",
+            "json",
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        actions = {(item["action"], item["path"]) for item in payload["actions"]}
+        self.assertTrue(
+            {
+                ("review-consolidate-authority", "ARCHITECTURE.md"),
+                ("review-remove-legacy", "docs/QUALITY_SCORE.md"),
+                ("review-raw-evidence", "docs/agent-harness/evidence/run.jsonl"),
+                ("review-consolidate-plan", "docs/exec-plans/active/shared.md"),
+                ("review-remove-proof-of-proof", "docs/legacy-plan.md"),
+            }.issubset(actions)
+        )
+        self.assertTrue(all(item.get("reason") for item in payload["actions"]))
+        self.assertEqual(before, tree_fingerprint(root))
+
+    def test_simplify_preview_preserves_evidence_with_a_certification_consumer(self) -> None:
+        temporary, root = self.make_root()
+        self.addCleanup(temporary.cleanup)
+        put(root, "docs/agent-harness/evidence/run.jsonl", "{}\n")
+        put(root, harness.CERTIFICATION_REL, "{}\n")
+        report = harness.simplification_preview(root)
+        self.assertNotIn(
+            "review-raw-evidence",
+            {item["action"] for item in report.actions},
+        )
+
+    def test_simplify_preview_does_not_follow_evidence_symlinks(self) -> None:
+        temporary, root = self.make_root()
+        outside_temporary, outside = self.make_root()
+        self.addCleanup(temporary.cleanup)
+        self.addCleanup(outside_temporary.cleanup)
+        put(outside, "run.jsonl", "{}\n")
+        (root / "docs/agent-harness").mkdir(parents=True)
+        (root / "docs/agent-harness/evidence").symlink_to(
+            outside,
+            target_is_directory=True,
+        )
+        report = harness.simplification_preview(root)
+        self.assertNotIn(
+            "review-raw-evidence",
+            {item["action"] for item in report.actions},
+        )
+
+    def test_simplify_preview_reports_no_safe_candidates_without_guessing(self) -> None:
+        temporary, root = self.make_root()
+        self.addCleanup(temporary.cleanup)
+        before = tree_fingerprint(root)
+        report = harness.simplification_preview(root)
+        self.assertEqual([], report.actions)
+        self.assertIn("SIMPLIFY000", {item.id for item in report.findings})
+        self.assertEqual(before, tree_fingerprint(root))
 
     def test_governed_bundle_excludes_optional_resources(self) -> None:
         self.assertNotIn("docs/agent-harness/evidence/.gitkeep", harness.GOVERNED_FILES)
@@ -3412,12 +3530,13 @@ _None._
             self.assertFalse(any(part in forbidden for part in rel.parts), rel.as_posix())
             self.assertNotIn(path.suffix.casefold(), {".pyc", ".pyo"})
 
-    def test_package_version_metadata_is_consistent_for_v020(self) -> None:
+    def test_package_version_metadata_is_consistent_for_v021(self) -> None:
         version = (harness.SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip()
         readme = (harness.SKILL_ROOT / "README.md").read_text(encoding="utf-8")
         changelog = (harness.SKILL_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertEqual("0.2.0", version)
-        self.assertIn("Package version: `0.2.0`", readme)
+        self.assertEqual("0.2.1", version)
+        self.assertIn("Package version: `0.2.1`", readme)
+        self.assertRegex(changelog, r"(?m)^## 0\.2\.1 — 2026-08-31$")
         self.assertRegex(changelog, r"(?m)^## 0\.2\.0 — 2026-08-31$")
         self.assertRegex(changelog, r"(?m)^## 0\.1\.0 — 2026-08-24 \(unreleased development baseline\)$")
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 — 2026-08-31
+
+- Clarify that audit, adopt, repair, simplify, and govern are skill workflow modes rather than MCP tools or helper subcommands.
+- Add `harness.py --version` backed by the package `VERSION` file.
+- Add the explicit, read-only `simplify --preview` helper for concrete duplicate-authority, duplicate-plan, legacy proof, and unconsumed raw-evidence candidates.
+- Keep the standalone package free of MCP or plugin runtime requirements.
+
 ## 0.2.0 — 2026-08-31
 
 - Add the read-only, one-file MVP scaffold with a default `mvp` profile; preserve existing `AGENTS.md` files and keep the governed scaffold separate.

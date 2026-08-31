@@ -36,6 +36,7 @@ except ModuleNotFoundError:  # Python 3.10 and earlier
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_ROOT = SKILL_ROOT / "assets" / "templates" / "project"
+VERSION_REL = "VERSION"
 MAX_TEXT_BYTES = 2 * 1024 * 1024
 MAX_STRUCTURED_NESTING = 64
 MAX_INDEX_ROWS = 25_000
@@ -454,6 +455,18 @@ MVP_SCAFFOLD_MAPPING = (
     ("assets/templates/fragments/AGENTS.mvp.md", "AGENTS.md"),
 )
 
+LEGACY_SIMPLIFICATION_CANDIDATES = (
+    (
+        "docs/QUALITY_SCORE.md",
+        "This pre-v0.2 scorecard has no default consumer; retain it only for an explicit scorecard workflow.",
+    ),
+    (
+        "docs/agent-harness/evidence/.gitkeep",
+        "This placeholder keeps an otherwise empty evidence directory; real strict evidence can create the directory when needed.",
+    ),
+)
+RAW_EVIDENCE_SUFFIXES = {".har", ".jsonl", ".log", ".trace"}
+
 
 def scaffold_template_mappings(
     profile: str,
@@ -474,6 +487,19 @@ def scaffold_template_mappings(
         profile,
         include_certification=include_certification,
     ))
+
+
+def package_version() -> str:
+    """Read the package version without creating another version authority."""
+    try:
+        version = (SKILL_ROOT / VERSION_REL).read_text(encoding="utf-8").strip()
+    except OSError:
+        return "unknown"
+    return (
+        version
+        if re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", version)
+        else "unknown"
+    )
 
 
 def scaffold_comment_fingerprints(text: str) -> set[str]:
@@ -6274,6 +6300,176 @@ def validate_harness_index_navigation(report: Report, root: Path) -> None:
             )
 
 
+def _add_simplification_action(
+    report: Report,
+    seen: set[tuple[str, str]],
+    action: str,
+    path: str,
+    reason: str,
+) -> None:
+    identity = (action, path)
+    if identity in seen:
+        return
+    seen.add(identity)
+    report.add_action({"action": action, "path": path, "reason": reason})
+
+
+def _direct_plan_slugs(directory: Path) -> set[str]:
+    if not directory.is_dir() or directory.is_symlink():
+        return set()
+    slugs: set[str] = set()
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if (
+                entry.name.endswith(".md")
+                and entry.is_file(follow_symlinks=False)
+                and not entry.is_symlink()
+            ):
+                slugs.add(Path(entry.name).stem)
+    return slugs
+
+
+def simplification_preview(root: Path) -> Report:
+    """Report concrete harness-reduction candidates without changing the repository."""
+    root = resolve_safe_directory(root)
+    report = Report(command="simplify", root=str(root))
+    seen: set[tuple[str, str]] = set()
+    authorities = load_authorities(root, report)
+
+    for authority, default_rel in DEFAULT_AUTHORITIES.items():
+        mapped_rel = authorities.get(authority, default_rel)
+        if mapped_rel == default_rel:
+            continue
+        try:
+            default_path = safe_target(root, default_rel)
+            mapped_path = safe_target(root, mapped_rel)
+        except SafeRefusal:
+            continue
+        if (
+            default_path.is_file()
+            and not default_path.is_symlink()
+            and mapped_path.is_file()
+            and not mapped_path.is_symlink()
+        ):
+            _add_simplification_action(
+                report,
+                seen,
+                "review-consolidate-authority",
+                default_rel,
+                f"The {authority} authority is mapped to {mapped_rel}; inspect inbound references and retain one canonical source.",
+            )
+
+    for relative, reason in LEGACY_SIMPLIFICATION_CANDIDATES:
+        try:
+            candidate = safe_target(root, relative)
+        except SafeRefusal:
+            continue
+        if candidate.is_file() and not candidate.is_symlink():
+            _add_simplification_action(
+                report,
+                seen,
+                "review-remove-legacy",
+                relative,
+                reason,
+            )
+
+    index_rel = authorities.get(
+        "exec_plan_index",
+        DEFAULT_AUTHORITIES["exec_plan_index"],
+    )
+    try:
+        index_path = safe_target(root, index_rel)
+        active_dir = lifecycle_path(root, index_path, "active")
+        completed_dir = lifecycle_path(root, index_path, "completed")
+        duplicate_slugs = _direct_plan_slugs(active_dir) & _direct_plan_slugs(
+            completed_dir
+        )
+    except (OSError, SafeRefusal, ValueError):
+        duplicate_slugs = set()
+    for slug in sorted(duplicate_slugs):
+        _add_simplification_action(
+            report,
+            seen,
+            "review-consolidate-plan",
+            relative_display(root, active_dir / f"{slug}.md"),
+            f"Plan slug {slug!r} exists in both active and completed lifecycle directories; retain the current authoritative state.",
+        )
+
+    certification_rel = authorities.get("certification", CERTIFICATION_REL)
+    try:
+        certification_path = safe_target(root, certification_rel)
+        evidence_root = safe_target(root, "docs/agent-harness/evidence")
+    except SafeRefusal:
+        certification_path = None
+        evidence_root = None
+    if (
+        certification_path is not None
+        and evidence_root is not None
+        and not certification_path.is_file()
+        and evidence_root.is_dir()
+        and not evidence_root.is_symlink()
+    ):
+        try:
+            evidence_entries = sorted(
+                os.scandir(evidence_root),
+                key=lambda entry: entry.name,
+            )
+        except OSError as exc:
+            report.add(
+                "SIMPLIFY001",
+                "warning",
+                relative_display(root, evidence_root),
+                f"Evidence preview could not enumerate the directory: {exc}.",
+                "Restore read access before deciding that evidence is unused.",
+            )
+            evidence_entries = []
+        for entry in evidence_entries:
+            try:
+                regular = entry.is_file(follow_symlinks=False)
+                symlink = entry.is_symlink()
+            except OSError:
+                continue
+            if (
+                not symlink
+                and regular
+                and Path(entry.name).suffix.casefold() in RAW_EVIDENCE_SUFFIXES
+            ):
+                relative = relative_display(root, evidence_root / entry.name)
+                _add_simplification_action(
+                    report,
+                    seen,
+                    "review-raw-evidence",
+                    relative,
+                    "A raw evidence-shaped file exists without a certification manifest consumer; verify retention requirements before removal.",
+                )
+
+    marker_re = re.compile(r"(?im)^[ \t]{1,3}Semantic-Review:[ \t]*")
+    for markdown in markdown_files(root, report):
+        try:
+            text = read_text_safe(root, markdown)
+        except (OSError, SafeRefusal):
+            continue
+        if marker_re.search(mask_markdown_code(text)):
+            relative = relative_display(root, markdown)
+            _add_simplification_action(
+                report,
+                seen,
+                "review-remove-proof-of-proof",
+                relative,
+                "A legacy semantic-review attestation marker remains; direct plan outcomes and structural checks are the retained proof.",
+            )
+
+    if not report.actions and not any(item.severity == "error" for item in report.findings):
+        report.add(
+            "SIMPLIFY000",
+            "info",
+            ".",
+            "No deterministic harness simplification candidates were found.",
+            "Use skill judgment for repository-specific duplication; this preview intentionally avoids guessing that an artifact is unused.",
+        )
+    return report.normalized()
+
+
 def discover_capabilities(
     report: Report,
     root: Path,
@@ -6689,6 +6885,9 @@ def print_report(report: Report, output_format: str) -> None:
         print(
             f"[{terminal_safe(action['action'])}] {terminal_safe(action['path'])}"
         )
+        reason = action.get("reason")
+        if reason:
+            print(f"  Reason: {terminal_safe(reason)}")
 
 
 def add_root_options(
@@ -6716,6 +6915,11 @@ def add_root_options(
 def build_parser() -> argparse.ArgumentParser:
     parser = HarnessArgumentParser(
         description="Read-only audit and validation for a repository agent harness"
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {package_version()}",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -6775,6 +6979,18 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--slug", required=True)
     validate.add_argument("--state", choices=("active", "completed"), required=True)
     validate.add_argument("--completion", action="store_true")
+
+    simplify = subparsers.add_parser(
+        "simplify",
+        help="Read-only preview of concrete harness-reduction candidates",
+    )
+    add_root_options(simplify, include_profile=False)
+    simplify.add_argument(
+        "--preview",
+        action="store_true",
+        required=True,
+        help="Confirm preview-only mode; no repository files are changed",
+    )
     return parser
 
 
@@ -6849,6 +7065,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.state,
                 args.completion,
             )
+            print_report(report, args.format)
+            return 1 if report.summary()["errors"] else 0
+        if args.command == "simplify":
+            report = simplification_preview(root)
             print_report(report, args.format)
             return 1 if report.summary()["errors"] else 0
         raise SafeRefusal(f"Unknown command: {args.command}")

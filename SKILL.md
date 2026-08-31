@@ -43,6 +43,14 @@ Zero-change adoption is valid when the repository already exposes the requested 
 - **ExecPlan lifecycle:** use an existing or new plan for cross-cutting, risky, multi-hour, uncertainty-heavy, or context-loss-sensitive work. Small, low-risk work need not create one. Plans are restartable current state, not execution transcripts; see [exec-plans.md](references/exec-plans.md).
 - **Strict certification:** enter the optional convergence loop in [certification-and-convergence.md](references/certification-and-convergence.md) only when strict attestation or provider-backed production evidence is explicitly required.
 
+## Interface boundary
+
+Audit, adopt, repair, simplify, and govern are skill workflow modes: Codex interprets them from the request and repository context. They do not imply callable MCP or CLI tools. Some names overlap with helper commands, while others remain instruction-only.
+
+The bundled helper is a separate deterministic, read-only interface. It exposes `audit`, `check`, `certify`, `scaffold`, `validate-plan`, and the explicit `simplify --preview` candidate report, plus top-level `--version`. `simplify --preview` never edits or removes files and does not authorize later writes; actual simplification follows the named-repository authority and safety rules below.
+
+This is a standalone skill with instructions, references, assets, and optional scripts. It does not bundle or require an MCP server or plugin runtime. Add such an integration only for a separately requested tool/context use case.
+
 ## Test every addition
 
 Before adding or retaining a harness artifact, decide whether an existing file or command already satisfies the need, which requested outcome or concrete current risk consumes it, and whether code, tests, Git, or an existing command can reproduce the information. A gate must catch a concrete defect rather than merely create evidence about evidence. Avoid artifacts that create more maintenance than value, and prefer reuse, merge, or deletion when that is smaller.
@@ -67,7 +75,7 @@ This authority does not extend to product code, domain models, service architect
 
 ## Apply and verify
 
-- The bundled `scripts/harness.py` helper is read-only. Use `audit` for a non-blocking report, `check` for deterministic structural errors, `scaffold` for a manifest preview, and `validate-plan` only for an adopted managed plan lifecycle. Never infer adoption from installation or a preview.
+- The bundled `scripts/harness.py` helper is read-only. Use `audit` for a non-blocking report, `check` for deterministic structural errors, `scaffold` for a manifest preview, `simplify --preview` for concrete reduction candidates, and `validate-plan` only for an adopted managed plan lifecycle. Never infer adoption from installation or a preview.
 - Keep the root `AGENTS.md` concise: orientation, canonical routes, commands, constraints, and definition of done. The MVP fragment has no target-specific placeholders or links; an existing `AGENTS.md` is preserved.
 - Prefer verification tiers: focused changed-behavior check; repository-native typecheck/test/build or equivalent when present; release or production smoke/deployment/health proof only when that scope is requested. Do not force release checks onto ordinary development.
 - Record concise evidence as command, result, and short observation. Do not put raw proof JSONL, full logs, traces, screenshots, HTTP inventories, or repeated hashes in plans or normal handoffs. Keep durable release or regulated artifacts only when they are the requested deliverable.
