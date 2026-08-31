@@ -4,6 +4,8 @@ Certification is not used by default. The ordinary harness workflow ends at the 
 
 The bundled verifier can issue the bounded claim `harness-ready` only for the optional strict attestation profile. Normal adoption should stop at the repository-native gate and literal local evidence; do not create HMAC records or an attestation overlay unless the user or repository policy explicitly requires this stricter result. In strict mode, the verifier checks the complete 31-row repository contract, local structure, HMAC record consistency, freshness, the project-native gate, and the Git source/attestation boundary. When every required check passes without an error or warning, `certify` emits `CERT000` and exits zero. This result says that the inspected repository harness is current for one source/direct-child attestation pair and one evidence window; it does not say that the application was released, deployed, or independently certified for production. Installation, scaffolding, documentation presence, an arbitrary caller-selected key, or a local-only assertion is not certification. Keep [`certification.json`](certification.json) at `claim: "harness-ready"`.
 
+The `certify` command accepts `--profile governed` (the default) or `--profile adaptive`. Both strict paths require the canonical coverage inventory; adaptive mode changes authority discovery, not the certification inventory.
+
 ## Convergence owner and command
 
 - Owner: <!-- TODO(harness): durable role or team -->

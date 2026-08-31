@@ -9,30 +9,30 @@ owner: <role-or-team>
 
 # <Short action-oriented title>
 
-Maintain this plan according to the [configured planning policy](../PLANS.md). Keep it self-contained and current so work can resume from this file alone. When copying this template into `active/`, adjust the relative link for the configured authority.
+Maintain this plan according to the [configured planning policy](../PLANS.md). Keep it self-contained and current so work can resume from this file alone; this is a current-state record, not an execution transcript. When copying this template into `active/`, adjust the relative link for the configured authority.
 
 ## Purpose / Big Picture
 
-<!-- Describe what a user or operator can do after this work and how to observe it. -->
+<!-- Describe the requested user or operator outcome and how to observe it. Every later step should trace to this outcome or a concrete current risk. -->
 
 ## Progress
 
-- [ ] Establish the first independently verifiable milestone.
+- [ ] Establish the first independently verifiable milestone tied to the outcome or a named risk.
 
 ## Surprises & Discoveries
 
-- Observation: None yet.
+- Observation: None yet; replace this with the current unknown or confirmed fact.
   Evidence: N/A.
 
 ## Decision Log
 
 - Decision: Use the approach described in this initial plan.
-  Rationale: Replace with repository-specific reasoning before implementation.
+  Rationale: Replace with repository-specific reasoning tied to the outcome or risk.
   Date/Author: <YYYY-MM-DD / role-or-team>
 
 ## Outcomes & Retrospective
 
-Not completed. Compare the final result with the purpose, list gaps, and record lessons before moving this plan.
+Not completed. Compare the final result with the purpose, list gaps, and record lessons before moving this plan. Keep later release or production state separate from local engineering completion.
 
 ## Context and Orientation
 
@@ -40,11 +40,11 @@ Not completed. Compare the final result with the purpose, list gaps, and record 
 
 ## Plan of Work
 
-<!-- Describe milestones as a narrative: goal, work, result, and proof. For difficult upstream behavior, name the library source/contract inspected or an isolated spike and its promotion/removal criteria. -->
+<!-- Describe only the milestones needed for the outcome: goal, work, result, and concise proof. For difficult upstream behavior, name the source/contract inspected or an isolated spike and its promotion/removal criteria. Plan size is a review signal, not a hard limit. -->
 
 ## Concrete Steps
 
-<!-- Name each working directory, exact command, short expected output, and relevant error message or failure signal. -->
+<!-- Name each working directory and exact command when it materially helps a restart; record short results and failure signals, not raw logs, traces, JSONL proof, screenshots, or reproducible output. -->
 
 ## Validation and Acceptance
 
@@ -56,7 +56,7 @@ Not completed. Compare the final result with the purpose, list gaps, and record 
 
 ## Artifacts and Notes
 
-<!-- Keep only concise transcripts, diffs, screenshots, logs, or links that prove important outcomes. -->
+<!-- Keep only concise commands, results, observations, diffs, or durable links that prove important outcomes. Do not paste raw transcripts, logs, traces, JSONL proof, or screenshots. -->
 
 ## Interfaces and Dependencies
 
@@ -64,7 +64,7 @@ Not completed. Compare the final result with the purpose, list gaps, and record 
 
 ## Revision History
 
-<!-- Before adding an entry, propagate the revision through every affected section so the plan remains internally consistent. Before completion, append one visible indented continuation to the final entry using: Semantic-Review: reviewer=<role-or-team>; reviewed-at=<YYYY-MM-DD HH:MMZ, not before the final revision or after current UTC>; content-sha256=<SHA-256 of the exact UTF-8 plan after removing this entire line, including its line ending>; evidence=<substantive observed review evidence>. This digest detects later edits but does not authenticate the reviewer or prove external approval. -->
+<!-- Before adding an entry, propagate the revision through every affected section so the plan remains internally consistent. Use one owning plan for a cross-repository outcome; child plans record only local change and verification. -->
 
 - (<YYYY-MM-DD HH:MMZ>) Change: Created the initial plan.
   Reason: Establish a restartable implementation record.

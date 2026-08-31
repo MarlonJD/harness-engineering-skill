@@ -11,8 +11,9 @@ Use these sources to distinguish transferable harness principles from repository
 
 ## Transferable principles
 
+- Start with the smallest useful change. A harness should earn each additional document, checker, plan, evidence artifact, or automation through a requested outcome or a concrete repeated risk.
 - Keep the automatically loaded instruction entry point concise and route deeper context to versioned repository documents. Codex selects at most one instruction file per directory, composes the chain from project root toward the working directory, and stops at `project_doc_max_bytes` (32 KiB by default); project config layers are trust- and precedence-dependent.
-- Make complex work restartable through self-contained, living plans.
+- Make complex work restartable through self-contained, living plans; simple work does not need an ExecPlan by default.
 - Give agents direct, deterministic ways to run, observe, verify, review, and recover work.
 - Expose repository-local tools and authorized source-control, review, and CI context through directly invocable paths rather than manual copy/paste.
 - Prefer stable, composable, well-understood technology; make important dependency behavior inspectable through checked-in contracts, adapters, fixtures, or references.
@@ -34,7 +35,8 @@ The Cookbook's sample contract also says to commit frequently while executing a 
 - Reimplementing dependencies locally.
 - Scheduled documentation-gardening or quality-scoring agents that open repair pull requests.
 - Minimally blocking merge gates, automated merge, and agent-authored release tooling.
-- The skill's 31-row HMAC attestation and `CERT000` result are optional governance extensions, not requirements stated by the Harness Engineering case study.
+- The skill's 31-row HMAC attestation and result codes are optional governance extensions, not requirements stated by the Harness Engineering case study; keep their labels in certification guidance.
+- A broad scaffold, permanent maintenance loop, strict coverage inventory, or release/production gate is not a default consequence of an audit. Use a one-file MVP orientation or an existing repository authority until a larger surface is justified.
 
 Require a repository-specific decision and evidence for each applicable capability. Record an explicit `N/A` or `blocked` reason rather than silently omitting it.
 
@@ -42,7 +44,7 @@ Require a repository-specific decision and evidence for each applicable capabili
 
 | Harness Engineering section | Skill implementation route |
 | --- | --- |
-| Starting from an empty repository | Discovery and proportional scaffold workflow in `SKILL.md`; setup and tool evidence in the capability registry |
+| Starting from an empty repository | One-file MVP orientation and proportional scaffold workflow in `SKILL.md`; deeper setup and tool evidence only when adopted |
 | Redefining the engineer's role | Human/agent responsibilities and reusable task loop in `operating-loop.md`; continuity through ExecPlans |
 | Making the application legible | Isolation, lifecycle, UI/API/CLI, logs, metrics, traces, cleanup, and concurrency in `environment-contract.md` and `verification-matrix.md` |
 | Repository knowledge as the record | Concise `AGENTS.md`, configured authorities, repository knowledge contract, indexes, generated/reference provenance, and link checks |

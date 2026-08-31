@@ -79,7 +79,7 @@ Those local observation records do not become provider-authenticated proof merel
 The ordinary read-only command is:
 
 ```text
-python3 <skill-dir>/scripts/harness.py certify --root <repo> --profile <adaptive|standard|full> --commit <trusted-attestation-commit-A> --attestation-key-file <absolute-evidence-key-path>
+python3 <skill-dir>/scripts/harness.py certify --root <repo> --profile <governed|adaptive> --commit <trusted-attestation-commit-A> --attestation-key-file <absolute-evidence-key-path>
 ```
 
 The v2 `harness-ready` manifest's `repository_commit` field is source commit `S`. The caller must obtain `--commit` as attestation commit `A` from a trusted CI or source-control context, not from the manifest. `A` must be the clean current `HEAD` and the direct single-parent child of `S`. The exact `S..A` changed-path set contains only the configured certification path, configured coverage path, exactly one referenced HMAC-consistent JSON file for each `verified` or justified `N/A` row, the named gate and maintenance records, and any approval and rollback records required by a verified production-authority row. All other project changes belong in `S`, never in the attestation overlay.
@@ -104,7 +104,7 @@ The template manifest stays `harness-ready` only for the strict profile. A compl
 The stricter read-only command adds one flag:
 
 ```text
-python3 <skill-dir>/scripts/harness.py certify --root <repo> --profile <adaptive|standard|full> --commit <trusted-attestation-commit-A> --attestation-key-file <absolute-evidence-key-path> --require-production-attestation
+python3 <skill-dir>/scripts/harness.py certify --root <repo> --profile <governed|adaptive> --commit <trusted-attestation-commit-A> --attestation-key-file <absolute-evidence-key-path> --require-production-attestation
 ```
 
 This explicit request additionally requires:

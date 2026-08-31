@@ -1,82 +1,26 @@
 # Execution Plans (ExecPlans)
 
-Use an ExecPlan for work that is cross-cutting, risky, multi-hour, uncertainty-heavy, or likely to cross a context or contributor boundary. A narrow mechanical change may use a lightweight plan unless more local instructions require an ExecPlan.
+Use a plan when work is cross-cutting, risky, multi-hour, uncertainty-heavy, or likely to cross a context or contributor boundary. A small, low-risk change can use the normal task handoff without creating a plan.
 
-## How to use an ExecPlan
+## Purpose and shape
 
-Read this file completely before authoring or executing a plan. Resolve `exec_plan_index` from `docs/agent-harness/config.json`; its sibling `active/` and `completed/` directories form the lifecycle. The bundled default is `docs/exec-plans/`. Keep the selected index synchronized and move a plan only after the completion gate passes.
+An ExecPlan is a restartable current-state record. A contributor should be able to resume from the file and current tree without replaying a chat or reading an execution transcript. Keep the purpose, current progress, decisions, next action, validation, recovery, and remaining work accurate.
 
-Keep the plan self-contained. Assume the next contributor has the current working tree and the plan file but no prior conversation. Continue through ordinary milestones without asking for the next step, while still honoring approval, destructive-action, Git, release, production, and external-write boundaries.
+Plan size is a review signal, not a hard limit. Remove stale detail and repeated facts when they stop helping resume the work. Every required step must trace to the requested outcome or a concrete current risk; do not add steps only to produce more process or evidence.
 
-Embed the project knowledge needed to execute the plan instead of outsourcing essential context to unversioned chats or external pages. Link checked-in canonical documents where useful, but repeat the assumptions required to resume safely.
+Keep evidence concise: command, result, and short observation. Do not paste raw logs, traces, JSONL proof, screenshots, HTTP inventories, or reproducible output into the plan. Link a durable release or regulated artifact only when it is the requested deliverable.
 
-## Requirements
+## Ownership and lifecycle
 
-- Explain the user-visible purpose and how to observe success.
-- Name repository-relative paths, relevant symbols, working directories, and exact commands.
-- Define repository-specific terms in plain language.
-- Keep `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` current.
-- Use independently verifiable milestones that produce working increments.
-- Describe milestones narratively as goal, work, result, and proof; keep granular state tracking separate in `Progress`.
-- Use additive prototypes or parallel implementations when they are the safest way to resolve meaningful uncertainty, and define promotion or removal criteria.
-- When difficult requirements depend on upstream behavior, inspect available library source or an authoritative checked-in contract, record the evidence, and use independent spikes when several unknowns can be tested separately.
-- Include expected outputs, relevant error messages, recovery paths, and concise evidence so a novice can distinguish success from failure.
-- Explain why selected dependencies and interfaces are appropriate; name the exact required types, interfaces or traits, function signatures, services, and stable paths when applicable.
-- Record a revision note whenever the plan changes.
-- Propagate each revision across every affected section before recording what changed and why.
+- Keep one owning plan for a cross-repository outcome. Child repositories carry only their local change and verification; do not copy the owning plan into each repository.
+- Resolve `exec_plan_index` from `agent-harness/config.json` when this managed lifecycle is adopted. Its sibling `active/` and `completed/` directories are the lifecycle; preserve an existing repository-native lifecycle when it is not compatible.
+- Keep `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` current when a plan exists.
+- Keep an unresolved plan active when an in-scope outcome is blocked. Release, production, or external approval work that is out of scope is recorded separately and does not block local engineering completion.
+- Move a plan to `completed/` only after its requested behavior and applicable focused/repository checks pass and the handoff records remaining release or production state separately.
 
-The OpenAI Cookbook sample advises frequent commits while executing a plan. This repository contract does not itself grant Git write authority: create commits or other source-control checkpoints only when current user and repository instructions authorize them. Otherwise, keep the plan and working tree sufficient for restart.
+## Recommended sections
 
-## Formatting
-
-- Keep a standalone plan as ordinary Markdown without an outer code fence.
-- Leave one blank line after every heading (two newline characters; CRLF is acceptable).
-- Use prose-first narrative. Use checkboxes only in `Progress`.
-- Use UTC timestamps in completed progress entries and revision notes.
-- Show commands and short transcripts as indented blocks when needed.
-
-## Metadata contract
-
-Every managed plan starts with the `harness-plan:v1` HTML comment block from the template and contains each field exactly once:
-
-| Field | Active plan | Completed plan |
-| --- | --- | --- |
-| `id` | Lowercase hyphenated slug equal to the filename stem | Unchanged |
-| `status` | `active` | `completed` |
-| `created` | Valid `YYYY-MM-DD` creation date | Unchanged |
-| `updated` | Valid current `YYYY-MM-DD`, not before `created` | Completion date or later |
-| `completed` | Empty | Valid `YYYY-MM-DD`, with `created <= completed <= updated` |
-| `owner` | Assigned durable role or team | Assigned durable role or team |
-
-At completion, update `status`, `updated`, and `completed` in the same controlled edit that moves the file and replaces its index row. Do not change `id` or `created`.
-
-## Lifecycle
-
-1. Create a lowercase hyphenated plan in the configured index's sibling `active/` directory and add one Active index entry. Preserve the exact registry title, Active/Completed headings, table headers, and lifecycle markers from the selected index so navigation remains mechanically verifiable.
-2. Update progress, discoveries, decisions, validation evidence, and revision history at every stopping point.
-3. Keep blocked or paused plans in `active/` with an explicit blocker and recovery condition.
-4. Before completion, run applicable acceptance checks, resolve placeholders, write the retrospective, and account for remaining work.
-5. Record the final semantic review as one visible indented continuation of the last structured Revision History entry: `Semantic-Review: reviewer=<role-or-team>; reviewed-at=<YYYY-MM-DD HH:MMZ>; content-sha256=<64-lowercase-hex>; evidence=<substantive observed review evidence>`. Hash the exact UTF-8 plan bytes after removing that entire attestation line, including its line ending. Use a review time no earlier than the final revision entry and no later than the current UTC time.
-6. Run the active completion gate with `--semantic-review`, move the same file to the configured index's sibling `completed/` directory, and update the index in the same change.
-7. Validate the completed state again with `--semantic-review` and run the repository-native check. Completed location never substitutes for the explicit assertion or recorded attestation.
-
-## Completion gate
-
-- The behavior promised in `Purpose / Big Picture` is observable.
-- Required progress has no unchecked item.
-- `Validation and Acceptance` records exact scoped evidence.
-- `Outcomes & Retrospective` compares the result with the original purpose and names remaining gaps.
-- `Idempotence and Recovery` reflects the final implementation.
-- No unresolved marker such as `TODO(harness)`, `TODO:`, `TBD:`, `<replace>`, or bundled template-only prose remains, including inside command or code examples.
-- Internal links resolve after the move.
-- A semantic reviewer confirms that the plan is self-contained, `owner` identifies a real durable role or team, milestones are meaningful, behavior is observable, and evidence is sufficient; structural validation rejects known placeholders and sentinels but cannot prove natural-language meaning.
-- The final Revision History entry persists that review with the exact local `Semantic-Review:` continuation format above, and both active and completed `validate-plan` invocations pass `--semantic-review` explicitly.
-
-`content-sha256` detects an edit after the recorded review; it does not authenticate `reviewer`. A repository writer can replace the line and recompute the digest. Never use this local consistency check as human approval, external review authority, or signed production evidence.
-
-## Repository-local strict schema
-
-This repository chooses the following local managed schema. Copy the selected repository plan template and use exactly these H2 headings in order; use H3 or lower for plan-specific subdivisions:
+Use the repository's existing plan structure. The bundled template provides these restartable sections:
 
 1. Purpose / Big Picture
 2. Progress
@@ -92,4 +36,10 @@ This repository chooses the following local managed schema. Copy the selected re
 12. Interfaces and Dependencies
 13. Revision History
 
-OpenAI's Cookbook presents a customizable ExecPlan pattern and identifies the four living sections above in its sample contract. The exact thirteen-heading schema, metadata, folders, index, owner field, and completion process here are repository-local conventions, not built-in Codex behavior.
+Use checkboxes only for current `Progress`; keep the other sections prose-first. Name exact paths and commands when they materially help a restart. Record timestamps for meaningful progress or revisions, not every command.
+
+## Verification and handoff
+
+Use the smallest applicable verification tier: focused changed-behavior check, existing repository-native gate, then release or production proof only when requested. Report `verified locally`, `not run`, and `blocked` literally, with a reason. A passing local check proves engineering state only; it does not prove release, deployment, customer impact, or production authority.
+
+Before closing a plan, compare the outcome with its purpose, state any gaps or follow-up, and confirm that retry and recovery instructions describe the final implementation. The bundled helper may validate an adopted managed plan's structure, but this guidance does not create a new validator or schema.

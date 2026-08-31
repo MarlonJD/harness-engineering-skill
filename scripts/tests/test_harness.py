@@ -91,26 +91,6 @@ def index_with_completed(
     )
 
 
-def refresh_semantic_review_digest(text: str) -> str:
-    attestation_line = next(
-        (
-            line
-            for line in text.splitlines(keepends=True)
-            if "Semantic-Review:" in line
-        ),
-        None,
-    )
-    if attestation_line is None:
-        return text
-    digest = hashlib.sha256(text.replace(attestation_line, "", 1).encode()).hexdigest()
-    return re.sub(
-        r"content-sha256=[0-9a-fA-F]{64}",
-        f"content-sha256={digest}",
-        text,
-        count=1,
-    )
-
-
 def plan_text(
     slug: str = "safe-plan",
     *,
@@ -120,18 +100,7 @@ def plan_text(
     completed: str = "",
     progress: str = "- [x] (2026-07-22 10:30Z) Verified the independently observable increment.",
     extra_artifacts: str = "The focused and broad evidence is recorded below.",
-    semantic_attestation: bool = True,
 ) -> str:
-    digest_placeholder = "0" * 64
-    semantic_review = (
-        "\n  Semantic-Review: reviewer=platform-team; "
-        "reviewed-at=2026-07-22 10:30Z; "
-        f"content-sha256={digest_placeholder}; "
-        "evidence=Confirmed self-containment, ownership, milestones, observable "
-        "behavior, recovery, and recorded acceptance evidence."
-        if semantic_attestation
-        else ""
-    )
     text = f"""<!-- harness-plan:v1
 id: {slug}
 status: {state}
@@ -196,10 +165,7 @@ The stable interfaces are the repository-local validation command, Markdown auth
 ## Revision History
 
 - (2026-07-22 10:30Z) Change: Recorded final scoped evidence. Reason: Make completion restartable and auditable.
-{semantic_review}
 """
-    if semantic_attestation:
-        text = refresh_semantic_review_digest(text)
     return text
 
 
@@ -359,8 +325,8 @@ class HarnessTests(unittest.TestCase):
             env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
         )
 
-    def install_standard_templates(self, root: Path) -> None:
-        for rel in harness.STANDARD_FILES:
+    def install_governed_templates(self, root: Path) -> None:
+        for rel in harness.GOVERNED_FILES:
             source = harness.TEMPLATE_ROOT / rel
             target = root / rel
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -440,7 +406,7 @@ class HarnessTests(unittest.TestCase):
                 str(root),
                 "--allow-non-git",
                 "--profile",
-                "standard",
+                "governed",
             ),
             (
                 "validate-plan",
@@ -452,7 +418,6 @@ class HarnessTests(unittest.TestCase):
                 "--state",
                 "active",
                 "--completion",
-                "--semantic-review",
             ),
         )
         for command in commands:
@@ -531,9 +496,7 @@ class HarnessTests(unittest.TestCase):
         put(
             root,
             "planning/exec-plans/active/safe-plan.md",
-            refresh_semantic_review_digest(
-                plan_text().replace("../../PLANS.md", "../../PLAN_POLICY.md")
-            ),
+            plan_text().replace("../../PLANS.md", "../../PLAN_POLICY.md"),
         )
         (root / "planning/exec-plans/completed").mkdir(parents=True)
         put(
@@ -550,43 +513,188 @@ class HarnessTests(unittest.TestCase):
             ),
         )
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertEqual([], [item for item in report.findings if item.severity == "error"])
 
-    def test_scaffold_is_preview_only_and_preserves_existing_file(self) -> None:
+    def test_mvp_scaffold_is_one_file_preview_and_preserves_existing_file(self) -> None:
         temporary, root = self.make_root()
         self.addCleanup(temporary.cleanup)
         put(root, "AGENTS.md", "custom\n")
         before = tree_fingerprint(root)
-        report = harness.scaffold_preview(root, "standard")
+        report = harness.scaffold_preview(root)
         self.assertEqual(before, tree_fingerprint(root))
-        actions = {item["path"]: item["action"] for item in report.actions}
-        self.assertEqual("preserve", actions["AGENTS.md"])
-        self.assertEqual("would-create", actions[harness.CONFIG_REL])
-        self.assertEqual("would-create-dir", actions["docs/exec-plans/active"])
+        self.assertEqual([{"action": "preserve", "path": "AGENTS.md"}], report.actions)
+        self.assertEqual([], report.findings)
 
-        full_report = harness.scaffold_preview(root, "full")
-        self.assertIn(
-            {"action": "would-merge", "path": "docs/index.md"},
-            full_report.actions,
+        empty_temporary, empty_root = self.make_root()
+        self.addCleanup(empty_temporary.cleanup)
+        empty_report = harness.scaffold_preview(empty_root)
+        self.assertEqual(
+            [{"action": "would-create", "path": "AGENTS.md"}],
+            empty_report.actions,
         )
+        self.assertEqual([], empty_report.findings)
+        self.assertEqual({}, tree_fingerprint(empty_root))
+
+    def test_adaptive_zero_change_is_a_valid_observed_adoption(self) -> None:
+        temporary, root = self.make_root()
+        self.addCleanup(temporary.cleanup)
+        put(root, "AGENTS.md", "# Guide\n\nRun the existing check.\n")
+        before = tree_fingerprint(root)
+        report = harness.audit_repository(root, "adaptive", "audit")
+        self.assertEqual(0, report.summary()["errors"])
+        self.assertEqual(before, tree_fingerprint(root))
+
+    def test_mvp_scaffold_has_no_managed_directories_or_extra_actions(self) -> None:
+        temporary, root = self.make_root()
+        self.addCleanup(temporary.cleanup)
+        report = harness.scaffold_preview(root, "mvp")
+        self.assertEqual(1, len(report.actions))
+        self.assertEqual("AGENTS.md", report.actions[0]["path"])
+        self.assertNotIn("docs/exec-plans/active", {item["path"] for item in report.actions})
+        self.assertNotIn("docs/exec-plans/completed", {item["path"] for item in report.actions})
+
+    def test_scaffold_mvp_fragment_is_self_contained_and_link_safe(self) -> None:
+        temporary, root = self.make_root()
+        self.addCleanup(temporary.cleanup)
+        fragment_path = (
+            harness.SKILL_ROOT
+            / "assets"
+            / "templates"
+            / "fragments"
+            / "AGENTS.mvp.md"
+        )
+        fragment = fragment_path.read_text(encoding="utf-8")
+        self.assertFalse(harness.has_scaffold_placeholder("AGENTS.md", fragment))
+        self.assertNotIn("TODO", fragment)
+        self.assertNotIn("<replace", fragment)
+        target = put(root, "AGENTS.md", fragment)
+        report = harness.Report(command="check", root=str(root.resolve()))
+        harness.check_text_links(report, root, target, fragment)
+        self.assertEqual([], [item for item in report.findings if item.severity == "error"])
+
+    def test_mvp_certification_is_rejected_without_mutation(self) -> None:
+        temporary, root = self.make_root()
+        self.addCleanup(temporary.cleanup)
+        before = tree_fingerprint(root)
+        with self.assertRaises(harness.SafeRefusal):
+            harness.scaffold_preview(root, "mvp", include_certification=True)
+        self.assertEqual(before, tree_fingerprint(root))
+        result = self.run_cli(
+            "scaffold",
+            "--root",
+            str(root),
+            "--allow-non-git",
+            "--profile",
+            "mvp",
+            "--with-certification",
+            "--format",
+            "json",
+        )
+        self.assertEqual(2, result.returncode)
+        self.assertEqual("CLI001", json.loads(result.stdout)["findings"][0]["id"])
+        self.assertEqual(before, tree_fingerprint(root))
+
+    def test_profile_matrix_keeps_audit_check_certify_and_scaffold_distinct(self) -> None:
+        parser = harness.build_parser()
+        self.assertEqual("adaptive", parser.parse_args(["audit"]).profile)
+        self.assertEqual("adaptive", parser.parse_args(["check"]).profile)
+        self.assertEqual("governed", parser.parse_args(["certify", "--commit", CERT_COMMIT]).profile)
+        self.assertEqual("adaptive", parser.parse_args(["certify", "--profile", "adaptive", "--commit", CERT_COMMIT]).profile)
+        self.assertEqual("mvp", parser.parse_args(["scaffold"]).profile)
+        self.assertEqual("governed", parser.parse_args(["scaffold", "--profile", "governed"]).profile)
+        for command in ("audit", "check", "certify"):
+            args = [command, "--profile", "standard"]
+            if command == "certify":
+                args += ["--commit", CERT_COMMIT]
+            result = self.run_cli(*args, "--allow-non-git")
+            self.assertEqual(2, result.returncode, command)
+            mvp_args = [command, "--profile", "mvp"]
+            if command == "certify":
+                mvp_args += ["--commit", CERT_COMMIT]
+            mvp_result = self.run_cli(*mvp_args, "--allow-non-git")
+            self.assertEqual(2, mvp_result.returncode, f"{command}:mvp")
+        for profile in ("standard", "full"):
+            result = self.run_cli(
+                "scaffold", "--profile", profile, "--allow-non-git"
+            )
+            self.assertEqual(2, result.returncode, profile)
+
+    def test_governed_bundle_excludes_optional_resources(self) -> None:
+        self.assertNotIn("docs/agent-harness/evidence/.gitkeep", harness.GOVERNED_FILES)
+        self.assertNotIn("docs/QUALITY_SCORE.md", harness.GOVERNED_FILES)
+        self.assertFalse(
+            (harness.TEMPLATE_ROOT / "docs/agent-harness/evidence/.gitkeep").exists()
+        )
+        self.assertFalse((harness.TEMPLATE_ROOT / "docs/QUALITY_SCORE.md").exists())
+        self.assertFalse(
+            (harness.SKILL_ROOT / "assets/templates/fragments/docs-index.full.md").exists()
+        )
+        self.assertNotIn("DESIGN.md", {Path(path).name for path in harness.GOVERNED_FILES})
+        self.assertNotIn("FRONTEND.md", {Path(path).name for path in harness.GOVERNED_FILES})
+        self.assertNotIn("PRODUCT_SENSE.md", {Path(path).name for path in harness.GOVERNED_FILES})
+
+    def test_governed_check_requires_canonical_coverage_but_adaptive_does_not(self) -> None:
+        temporary, root = self.make_root()
+        self.addCleanup(temporary.cleanup)
+        put(root, "AGENTS.md", "# Guide\n")
+        custom_coverage = put(
+            root,
+            "custom/coverage.md",
+            "# Coverage\n\n| Capability | Implementation | Evidence | Status and reason |\n| --- | --- | --- | --- |\n| Orientation | AGENTS.md | local check | verified — route was exercised locally |\n",
+        )
+        put(
+            root,
+            harness.CONFIG_REL,
+            json.dumps({"schema_version": 1, "authorities": {"coverage": "custom/coverage.md"}}),
+        )
+        adaptive = harness.audit_repository(root, "adaptive", "check")
+        self.assertNotIn("COVERAGE003", {item.id for item in adaptive.findings})
+        governed = harness.audit_repository(root, "governed", "check")
+        self.assertIn("PATH001", {item.id for item in governed.findings})
+        report = harness.Report(command="check", root=str(root.resolve()))
+        harness.validate_coverage(report, root, custom_coverage, require_canonical_rows=True)
+        self.assertIn("COVERAGE003", {item.id for item in report.findings})
+
+    def test_validate_plan_has_no_semantic_review_flag_or_findings(self) -> None:
+        temporary, root = self.make_root()
+        self.addCleanup(temporary.cleanup)
+        result = self.run_cli(
+            "validate-plan",
+            "--root",
+            str(root),
+            "--allow-non-git",
+            "--slug",
+            "safe-plan",
+            "--state",
+            "active",
+            "--semantic-review",
+            "--format",
+            "json",
+        )
+        self.assertEqual(2, result.returncode)
+        self.assertEqual("CLI000", json.loads(result.stdout)["findings"][0]["id"])
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertNotIn("SemanticReviewAttestation", source)
+        self.assertNotIn("PLAN013", source)
+        self.assertNotIn("PLAN016", source)
 
     def test_certification_is_disabled_and_not_scaffolded_by_default(self) -> None:
         temporary, root = self.make_root()
         self.addCleanup(temporary.cleanup)
 
-        self.assertNotIn("docs/agent-harness/certification.md", harness.STANDARD_FILES)
-        self.assertNotIn(harness.CERTIFICATION_REL, harness.STANDARD_FILES)
+        self.assertNotIn("docs/agent-harness/certification.md", harness.GOVERNED_FILES)
+        self.assertNotIn(harness.CERTIFICATION_REL, harness.GOVERNED_FILES)
 
-        default_report = harness.scaffold_preview(root, "standard")
+        default_report = harness.scaffold_preview(root, "governed")
         default_paths = {item["path"] for item in default_report.actions}
         self.assertNotIn("docs/agent-harness/certification.md", default_paths)
         self.assertNotIn(harness.CERTIFICATION_REL, default_paths)
 
         opted_in_report = harness.scaffold_preview(
             root,
-            "standard",
+            "governed",
             include_certification=True,
         )
         opted_in_actions = {
@@ -622,20 +730,20 @@ class HarnessTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         (root / "AGENTS.md").symlink_to(root / "missing-outside-target.md")
         with self.assertRaises(harness.SafeRefusal):
-            harness.scaffold_preview(root, "standard")
+            harness.scaffold_preview(root, "mvp")
 
-    def test_standard_templates_have_no_broken_links(self) -> None:
+    def test_governed_templates_have_no_broken_links(self) -> None:
         temporary, root = self.make_root()
         self.addCleanup(temporary.cleanup)
-        self.install_standard_templates(root)
-        report = harness.audit_repository(root, "standard", "check")
+        self.install_governed_templates(root)
+        report = harness.audit_repository(root, "governed", "check")
         self.assertEqual([], [item for item in report.findings if item.severity == "error"])
         self.assertIn("DOC001", {item.id for item in report.findings})
 
-    def test_existing_agents_merge_fragment_routes_standard_authorities(self) -> None:
+    def test_existing_agents_merge_fragment_routes_governed_authorities(self) -> None:
         temporary, root = self.make_root()
         self.addCleanup(temporary.cleanup)
-        self.install_standard_templates(root)
+        self.install_governed_templates(root)
         fragment = (
             harness.SKILL_ROOT
             / "assets"
@@ -644,32 +752,8 @@ class HarnessTests(unittest.TestCase):
             / "AGENTS.harness.md"
         ).read_text(encoding="utf-8")
         put(root, "AGENTS.md", "# Existing repository instructions\n\n" + fragment)
-        report = harness.audit_repository(root, "standard", "check")
+        report = harness.audit_repository(root, "governed", "check")
         self.assertNotIn("ROUTE002", {item.id for item in report.findings})
-
-    def test_full_profile_templates_have_no_broken_links(self) -> None:
-        temporary, root = self.make_root()
-        self.addCleanup(temporary.cleanup)
-        self.install_standard_templates(root)
-        for rel in harness.FULL_ONLY_FILES:
-            source = harness.TEMPLATE_ROOT / rel
-            target = root / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
-        fragment = (
-            harness.SKILL_ROOT
-            / "assets"
-            / "templates"
-            / "fragments"
-            / "docs-index.full.md"
-        ).read_text(encoding="utf-8")
-        docs_index = root / "docs/index.md"
-        docs_index.write_text(
-            docs_index.read_text(encoding="utf-8") + "\n" + fragment,
-            encoding="utf-8",
-        )
-        report = harness.audit_repository(root, "full", "check")
-        self.assertEqual([], [item for item in report.findings if item.severity == "error"])
 
     def test_index_escape_and_malformed_rows_are_findings_not_exceptions(self) -> None:
         temporary, root = self.make_root()
@@ -728,7 +812,7 @@ class HarnessTests(unittest.TestCase):
             plan_text(extra_artifacts="TODO replace this artifact with evidence."),
         )
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", False, False
+            root, "safe-plan", "active", False
         )
         finding = next(item for item in report.findings if item.id == "PLAN008")
         self.assertEqual("warning", finding.severity)
@@ -740,7 +824,7 @@ class HarnessTests(unittest.TestCase):
         progress = "- [X] Finished without a timestamp.\n  - [ ] Required nested follow-up."
         put(root, "docs/exec-plans/active/safe-plan.md", plan_text(progress=progress))
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         ids = {item.id for item in report.findings}
         self.assertIn("PLAN004", ids)
@@ -757,7 +841,7 @@ class HarnessTests(unittest.TestCase):
             plan_text(extra_artifacts="Current peer evidence is [here](peer.md)."),
         )
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("PLAN014", {item.id for item in report.findings})
 
@@ -768,7 +852,7 @@ class HarnessTests(unittest.TestCase):
         put(root, "docs/exec-plans/active/safe-plan.md", plan_text())
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertEqual([], [item for item in report.findings if item.severity == "error"])
 
@@ -778,7 +862,7 @@ class HarnessTests(unittest.TestCase):
         self.install_plan_lifecycle(root)
         put(root, "docs/exec-plans/active/safe-plan.md", plan_text())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("PLAN011", {item.id for item in report.findings})
 
@@ -793,7 +877,7 @@ class HarnessTests(unittest.TestCase):
         )
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("PLAN014", {item.id for item in report.findings})
 
@@ -808,7 +892,6 @@ class HarnessTests(unittest.TestCase):
             plan_text(
                 state="completed",
                 completed="2026-07-22",
-                semantic_attestation=False,
             ),
         )
         index = index_with_active().replace(
@@ -833,7 +916,7 @@ class HarnessTests(unittest.TestCase):
         put(root, "docs/exec-plans/active/safe-plan.md", text)
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("PLAN006", {item.id for item in report.findings})
 
@@ -848,7 +931,7 @@ class HarnessTests(unittest.TestCase):
         put(root, "docs/exec-plans/active/safe-plan.md", plan_text(progress=progress))
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("PLAN005", {item.id for item in report.findings})
 
@@ -865,7 +948,7 @@ class HarnessTests(unittest.TestCase):
         put(root, "docs/exec-plans/active/safe-plan.md", plan_text(progress=progress))
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("PLAN005", {item.id for item in report.findings})
 
@@ -881,7 +964,7 @@ class HarnessTests(unittest.TestCase):
         put(root, "docs/exec-plans/active/safe-plan.md", plan_text(progress=progress))
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("PLAN005", {item.id for item in report.findings})
 
@@ -897,7 +980,7 @@ class HarnessTests(unittest.TestCase):
         put(root, "docs/exec-plans/active/safe-plan.md", text)
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("PLAN003", {item.id for item in report.findings})
 
@@ -912,7 +995,7 @@ class HarnessTests(unittest.TestCase):
         put(root, "docs/exec-plans/active/safe-plan.md", plan_text(progress=progress))
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("PLAN005", {item.id for item in report.findings})
 
@@ -927,7 +1010,7 @@ class HarnessTests(unittest.TestCase):
         )
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertNotIn("PLAN006", {item.id for item in report.findings})
 
@@ -944,7 +1027,7 @@ class HarnessTests(unittest.TestCase):
         put(root, "docs/exec-plans/active/safe-plan.md", text)
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         ids = {item.id for item in report.findings}
         self.assertNotIn("PLAN007", ids)
@@ -963,7 +1046,7 @@ class HarnessTests(unittest.TestCase):
         put(root, "docs/exec-plans/active/safe-plan.md", text)
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         ids = {item.id for item in report.findings}
         self.assertIn("PLAN007", ids)
@@ -980,7 +1063,7 @@ class HarnessTests(unittest.TestCase):
         )
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", False, False
+            root, "safe-plan", "active", False
         )
         self.assertIn("PLAN015", {item.id for item in report.findings})
 
@@ -996,7 +1079,7 @@ class HarnessTests(unittest.TestCase):
         put(root, "docs/exec-plans/active/safe-plan.md", text)
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("PLAN007", {item.id for item in report.findings})
 
@@ -1013,7 +1096,7 @@ class HarnessTests(unittest.TestCase):
         )
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", False, False
+            root, "safe-plan", "active", False
         )
         link_findings = [item for item in report.findings if item.id == "PLAN015"]
         self.assertGreaterEqual(len(link_findings), 2)
@@ -1030,7 +1113,7 @@ class HarnessTests(unittest.TestCase):
         )
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", False, False
+            root, "safe-plan", "active", False
         )
         self.assertNotIn("PLAN015", {item.id for item in report.findings})
 
@@ -1045,7 +1128,7 @@ class HarnessTests(unittest.TestCase):
         )
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", False, False
+            root, "safe-plan", "active", False
         )
         self.assertNotIn("PLAN002", {item.id for item in report.findings})
 
@@ -1059,7 +1142,7 @@ class HarnessTests(unittest.TestCase):
         put(root, "docs/exec-plans/active/safe-plan.md", legitimate)
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", False, False
+            root, "safe-plan", "active", False
         )
         self.assertNotIn("PLAN008", {item.id for item in report.findings})
 
@@ -1068,7 +1151,7 @@ class HarnessTests(unittest.TestCase):
         )
         put(root, "docs/exec-plans/active/safe-plan.md", template_prose)
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", False, False
+            root, "safe-plan", "active", False
         )
         self.assertIn("PLAN008", {item.id for item in report.findings})
 
@@ -1084,7 +1167,7 @@ class HarnessTests(unittest.TestCase):
         )
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("PLAN008", {item.id for item in report.findings})
 
@@ -1096,7 +1179,7 @@ class HarnessTests(unittest.TestCase):
         put(root, "docs/exec-plans/active/safe-plan.md", text)
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("PLAN003", {item.id for item in report.findings})
 
@@ -1112,7 +1195,7 @@ class HarnessTests(unittest.TestCase):
         put(root, "docs/exec-plans/active/safe-plan.md", text)
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", False, False
+            root, "safe-plan", "active", False
         )
         self.assertIn("PLAN003", {item.id for item in report.findings})
 
@@ -1128,7 +1211,7 @@ class HarnessTests(unittest.TestCase):
         put(root, "docs/exec-plans/active/safe-plan.md", text)
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", False, False
+            root, "safe-plan", "active", False
         )
         self.assertIn("PLAN003", {item.id for item in report.findings})
 
@@ -1140,7 +1223,7 @@ class HarnessTests(unittest.TestCase):
         put(root, "docs/exec-plans/active/safe-plan.md", text)
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("PLAN010", {item.id for item in report.findings})
 
@@ -1254,7 +1337,7 @@ _None._
         put(root, "docs/exec-plans/active/safe-plan.md", text)
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         ids = {item.id for item in report.findings}
         self.assertIn("PLAN009", ids)
@@ -1264,7 +1347,7 @@ _None._
         with self.assertRaises(harness.SafeRefusal):
             harness.audit_repository(Path.home(), "adaptive", "audit")
         with self.assertRaises(harness.SafeRefusal):
-            harness.scaffold_preview(Path.home(), "standard")
+            harness.scaffold_preview(Path.home(), "mvp")
 
     def test_unreadable_config_becomes_a_finding(self) -> None:
         temporary, root = self.make_root()
@@ -1567,7 +1650,7 @@ _None._
         harness.check_text_links(report, root, source, source.read_text(encoding="utf-8"))
         self.assertEqual(2, len([item for item in report.findings if item.id == "LINK001"]))
 
-    def test_standard_profile_is_documented_as_exact_layout(self) -> None:
+    def test_governed_profile_is_documented_as_exact_layout(self) -> None:
         temporary, root = self.make_root()
         self.addCleanup(temporary.cleanup)
         put(root, "planning/PLAN_POLICY.md", "# Planning\n")
@@ -1581,7 +1664,7 @@ _None._
                 }
             ),
         )
-        report = harness.audit_repository(root, "standard", "check")
+        report = harness.audit_repository(root, "governed", "check")
         planning = next(
             item for item in report.findings if item.id == "PATH001" and item.path == "docs/PLANS.md"
         )
@@ -1602,7 +1685,7 @@ _None._
         put(outside, "safe-plan.md", plan_text())
         (root / "docs/exec-plans/active").symlink_to(outside, target_is_directory=True)
         with self.assertRaises(harness.SafeRefusal):
-            harness.validate_plan_command(root, "safe-plan", "active", False, False)
+            harness.validate_plan_command(root, "safe-plan", "active", False)
 
     def test_fenced_markdown_cannot_supply_plan_schema_or_progress(self) -> None:
         temporary, root = self.make_root()
@@ -1618,7 +1701,7 @@ _None._
         text += "\n```markdown\n## Context and Orientation\n```\n"
         put(root, "docs/exec-plans/active/safe-plan.md", text)
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         ids = {item.id for item in report.findings}
         self.assertIn("PLAN003", ids)
@@ -1634,7 +1717,7 @@ _None._
             plan_text(extra_artifacts="Required [evidence](missing.md) is absent."),
         )
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", False, False
+            root, "safe-plan", "active", False
         )
         self.assertIn("PLAN015", {item.id for item in report.findings})
 
@@ -1668,7 +1751,7 @@ _None._
         )
         put(root, "docs/exec-plans/active/safe-plan.md", duplicate)
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", False, False
+            root, "safe-plan", "active", False
         )
         self.assertIn("PLAN002", {item.id for item in report.findings})
 
@@ -1700,7 +1783,7 @@ _None._
         ).replace("(2026-07-22 10:30Z) Change:", "(2026-99-99 99:99Z) Change:")
         put(root, "docs/exec-plans/active/safe-plan.md", text)
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         ids = {item.id for item in report.findings}
         self.assertIn("PLAN004", ids)
@@ -1765,108 +1848,9 @@ _None._
             ),
         )
         report = harness.validate_plan_command(
-            root, "safe-plan", "completed", False, False
+            root, "safe-plan", "completed", False
         )
         self.assertIn("PLAN002", {item.id for item in report.findings})
-
-    def test_completed_plan_requires_flag_and_persistent_semantic_attestation(self) -> None:
-        temporary, root = self.make_root()
-        self.addCleanup(temporary.cleanup)
-        self.install_plan_lifecycle(root)
-        put(
-            root,
-            "docs/exec-plans/completed/safe-plan.md",
-            plan_text(
-                state="completed",
-                completed="2026-07-22",
-                semantic_attestation=False,
-            ),
-        )
-        put(root, "docs/exec-plans/index.md", index_with_completed())
-        report = harness.validate_plan_command(
-            root, "safe-plan", "completed", False, False
-        )
-        ids = {item.id for item in report.findings}
-        self.assertIn("PLAN013", ids)
-        self.assertIn("PLAN016", ids)
-
-    def test_completed_plan_accepts_persistent_semantic_attestation(self) -> None:
-        temporary, root = self.make_root()
-        self.addCleanup(temporary.cleanup)
-        self.install_plan_lifecycle(root)
-        completed = plan_text(
-            state="completed",
-            completed="2026-07-22",
-        )
-        put(root, "docs/exec-plans/completed/safe-plan.md", completed)
-        put(root, "docs/exec-plans/index.md", index_with_completed())
-        report = harness.validate_plan_command(
-            root, "safe-plan", "completed", False, True
-        )
-        ids = {item.id for item in report.findings}
-        self.assertNotIn("PLAN013", ids)
-        self.assertNotIn("PLAN016", ids)
-
-    def test_completed_plan_rejects_attestation_hidden_in_fenced_code(self) -> None:
-        temporary, root = self.make_root()
-        self.addCleanup(temporary.cleanup)
-        self.install_plan_lifecycle(root)
-        completed = plan_text(state="completed", completed="2026-07-22")
-        lines = completed.splitlines(keepends=True)
-        attestation = next(line for line in lines if "Semantic-Review:" in line)
-        completed = "".join(line for line in lines if line != attestation)
-        completed += f"\n  ```text\n{attestation}  ```\n"
-        put(root, "docs/exec-plans/completed/safe-plan.md", completed)
-        put(root, "docs/exec-plans/index.md", index_with_completed())
-        report = harness.validate_plan_command(
-            root, "safe-plan", "completed", False, True
-        )
-        self.assertIn("PLAN016", {item.id for item in report.findings})
-
-    def test_completed_plan_rejects_stale_attestation_after_content_change(self) -> None:
-        temporary, root = self.make_root()
-        self.addCleanup(temporary.cleanup)
-        self.install_plan_lifecycle(root)
-        completed = plan_text(state="completed", completed="2026-07-22").replace(
-            "No user-visible gap remains",
-            "A new unreviewed production-impacting gap remains",
-            1,
-        )
-        put(root, "docs/exec-plans/completed/safe-plan.md", completed)
-        put(root, "docs/exec-plans/index.md", index_with_completed())
-        report = harness.validate_plan_command(
-            root, "safe-plan", "completed", False, True
-        )
-        self.assertIn("PLAN016", {item.id for item in report.findings})
-
-    def test_completed_plan_rejects_future_semantic_review_timestamp(self) -> None:
-        temporary, root = self.make_root()
-        self.addCleanup(temporary.cleanup)
-        self.install_plan_lifecycle(root)
-        completed = refresh_semantic_review_digest(
-            plan_text(state="completed", completed="2026-07-22").replace(
-                "reviewed-at=2026-07-22 10:30Z",
-                "reviewed-at=2999-01-01 00:00Z",
-                1,
-            )
-        )
-        put(root, "docs/exec-plans/completed/safe-plan.md", completed)
-        put(root, "docs/exec-plans/index.md", index_with_completed())
-        report = harness.validate_plan_command(
-            root, "safe-plan", "completed", False, True
-        )
-        self.assertIn("PLAN016", {item.id for item in report.findings})
-
-    def test_semantic_review_digest_removes_only_the_live_attestation_line(self) -> None:
-        completed = plan_text(state="completed", completed="2026-07-22")
-        attestations = harness.live_semantic_review_attestations(completed)
-        self.assertEqual(1, len(attestations))
-        attestation = attestations[0]
-        expected = hashlib.sha256(
-            (completed[: attestation.start] + completed[attestation.end :]).encode()
-        ).hexdigest()
-        self.assertEqual(expected, harness.semantic_review_content_sha256(completed))
-        self.assertTrue(harness.semantic_review_attestation_is_valid(completed))
 
     def test_cli_audit_json_is_nonblocking_even_with_errors(self) -> None:
         temporary, root = self.make_root()
@@ -1914,7 +1898,7 @@ _None._
             str(root),
             "--allow-non-git",
             "--profile",
-            "standard",
+            "governed",
             "--apply",
         )
         self.assertEqual(2, apply_result.returncode)
@@ -1985,7 +1969,7 @@ _None._
         )
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", False, False
+            root, "safe-plan", "active", False
         )
         ids = {item.id for item in report.findings}
         self.assertTrue({"PLAN003", "PLAN004", "PLAN007"}.issubset(ids))
@@ -2066,21 +2050,9 @@ _None._
         put(root, "docs/exec-plans/active/safe-plan.md", text)
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("PLAN008", {item.id for item in report.findings})
-
-    def test_full_profile_requires_every_guidance_route(self) -> None:
-        temporary, root = self.make_root()
-        self.addCleanup(temporary.cleanup)
-        self.install_standard_templates(root)
-        for rel in harness.FULL_ONLY_FILES:
-            source = harness.TEMPLATE_ROOT / rel
-            target = root / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
-        report = harness.audit_repository(root, "full", "check")
-        self.assertIn("ROUTE004", {item.id for item in report.findings})
 
     def test_invalid_link_title_cannot_satisfy_policy_or_registry(self) -> None:
         temporary, root = self.make_root()
@@ -2093,7 +2065,7 @@ _None._
         )
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("PLAN007", {item.id for item in report.findings})
 
@@ -2106,7 +2078,7 @@ _None._
             ),
         )
         registry_report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("INDEX002", {item.id for item in registry_report.findings})
 
@@ -2122,7 +2094,7 @@ _None._
         put(root, "docs/exec-plans/active/safe-plan.md", text)
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("PLAN007", {item.id for item in report.findings})
 
@@ -2137,7 +2109,7 @@ _None._
         put(root, "docs/exec-plans/active/safe-plan.md", text)
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("PLAN007", {item.id for item in report.findings})
 
@@ -2152,7 +2124,7 @@ _None._
         put(root, "docs/exec-plans/active/safe-plan.md", text)
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("PLAN007", {item.id for item in report.findings})
 
@@ -2173,7 +2145,7 @@ _None._
         )
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("PLAN005", {item.id for item in report.findings})
 
@@ -2194,7 +2166,7 @@ _None._
         put(root, "docs/exec-plans/active/safe-plan.md", text)
         put(root, "docs/exec-plans/index.md", index_with_active())
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         self.assertIn("PLAN007", {item.id for item in report.findings})
 
@@ -2214,7 +2186,7 @@ _None._
                 put(root, "docs/exec-plans/active/safe-plan.md", text)
                 put(root, "docs/exec-plans/index.md", index_with_active())
                 report = harness.validate_plan_command(
-                    root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
                 )
                 self.assertIn("PLAN007", {item.id for item in report.findings})
 
@@ -2245,7 +2217,7 @@ _None._
                 )
                 put(root, "docs/exec-plans/index.md", index_with_active())
                 report = harness.validate_plan_command(
-                    root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
                 )
                 self.assertIn("PLAN004", {item.id for item in report.findings})
 
@@ -2275,7 +2247,7 @@ _None._
                 )
                 put(root, "docs/exec-plans/index.md", index_with_active())
                 report = harness.validate_plan_command(
-                    root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
                 )
                 self.assertIn("PLAN005", {item.id for item in report.findings})
 
@@ -2305,9 +2277,9 @@ _None._
     def test_root_override_is_the_authority_reachability_entry(self) -> None:
         temporary, root = self.make_root()
         self.addCleanup(temporary.cleanup)
-        self.install_standard_templates(root)
+        self.install_governed_templates(root)
         put(root, "AGENTS.override.md", "# Temporary override\n\nNo authority routes.\n")
-        report = harness.audit_repository(root, "standard", "check")
+        report = harness.audit_repository(root, "governed", "check")
         route_findings = [item for item in report.findings if item.id == "ROUTE002"]
         self.assertTrue(route_findings)
         self.assertTrue(any("AGENTS.override.md" in item.message for item in route_findings))
@@ -2315,8 +2287,8 @@ _None._
     def test_profile_check_detects_generic_scaffold_comments(self) -> None:
         temporary, root = self.make_root()
         self.addCleanup(temporary.cleanup)
-        self.install_standard_templates(root)
-        for rel in harness.STANDARD_FILES:
+        self.install_governed_templates(root)
+        for rel in harness.GOVERNED_FILES:
             path = root / rel
             if not path.is_file():
                 continue
@@ -2325,7 +2297,7 @@ _None._
                 text.replace("TODO(harness): ", "").replace("TODO(harness)", ""),
                 encoding="utf-8",
             )
-        report = harness.audit_repository(root, "standard", "check")
+        report = harness.audit_repository(root, "governed", "check")
         self.assertIn("DOC001", {item.id for item in report.findings})
 
     def test_tbd_owner_and_title_block_completion(self) -> None:
@@ -2351,7 +2323,7 @@ _None._
                 put(root, "docs/exec-plans/active/safe-plan.md", text)
                 put(root, "docs/exec-plans/index.md", index)
                 report = harness.validate_plan_command(
-                    root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
                 )
                 self.assertTrue(expected.issubset({item.id for item in report.findings}))
 
@@ -2400,7 +2372,7 @@ _None._
                 put(root, "docs/exec-plans/active/safe-plan.md", text)
                 put(root, "docs/exec-plans/index.md", index_with_active())
                 report = harness.validate_plan_command(
-                    root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
                 )
                 self.assertIn("PLAN003", {item.id for item in report.findings})
 
@@ -2432,7 +2404,7 @@ _None._
                 )
                 put(root, "docs/exec-plans/index.md", index_with_active())
                 report = harness.validate_plan_command(
-                    root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
                 )
                 self.assertIn(expected, {item.id for item in report.findings})
 
@@ -2500,7 +2472,7 @@ _None._
                 )
                 put(root, "docs/exec-plans/index.md", index_with_active())
                 report = harness.validate_plan_command(
-                    root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
                 )
                 self.assertIn("PLAN008", {item.id for item in report.findings})
 
@@ -2615,9 +2587,9 @@ _None._
     def test_empty_override_falls_back_and_override_placeholders_are_scanned(self) -> None:
         temporary, root = self.make_root()
         self.addCleanup(temporary.cleanup)
-        self.install_standard_templates(root)
+        self.install_governed_templates(root)
         put(root, "AGENTS.override.md", "  \n\t\n")
-        report = harness.audit_repository(root, "standard", "check")
+        report = harness.audit_repository(root, "governed", "check")
         self.assertNotIn("ROUTE002", {item.id for item in report.findings})
 
         put(
@@ -2625,7 +2597,7 @@ _None._
             "AGENTS.override.md",
             "# Override\n\n<!-- TODO(harness): add authority routes -->\n",
         )
-        report = harness.audit_repository(root, "standard", "check")
+        report = harness.audit_repository(root, "governed", "check")
         self.assertIn("DOC001", {item.id for item in report.findings})
 
     def test_policy_text_naming_forbidden_markers_is_not_a_scaffold_placeholder(self) -> None:
@@ -2729,7 +2701,7 @@ _None._
                 )
                 put(root, "docs/exec-plans/index.md", index_with_active())
                 report = harness.validate_plan_command(
-                    root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
                 )
                 self.assertIn("PLAN003", {item.id for item in report.findings})
 
@@ -2767,7 +2739,7 @@ _None._
             ),
         )
         report = harness.validate_plan_command(
-            root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
         )
         ids = {item.id for item in report.findings}
         self.assertTrue({"PLAN002", "PLAN003", "PLAN009", "INDEX002"}.issubset(ids))
@@ -2814,7 +2786,7 @@ _None._
         progress = template.split("## Progress", 1)[1].split("## Surprises", 1)[0]
         self.assertNotIn("<YYYY-MM-DD HH:MMZ>", progress)
 
-    def test_adaptive_mapped_coverage_retains_complete_inventory(self) -> None:
+    def test_adaptive_mapped_coverage_does_not_require_canonical_inventory(self) -> None:
         temporary, root = self.make_root()
         self.addCleanup(temporary.cleanup)
         put(root, "AGENTS.md", "# Guide\n\n[Coverage](custom/coverage.md)\n")
@@ -2837,7 +2809,7 @@ _None._
             ),
         )
         report = harness.audit_repository(root, "adaptive", "check")
-        self.assertIn("COVERAGE003", {item.id for item in report.findings})
+        self.assertNotIn("COVERAGE003", {item.id for item in report.findings})
 
     def test_explicit_exec_plan_lifecycle_requires_planning_authority(self) -> None:
         temporary, root = self.make_root()
@@ -2915,7 +2887,7 @@ _None._
                     index_with_active(owner=owner, milestone=milestone),
                 )
                 report = harness.validate_plan_command(
-                    root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
                 )
                 ids = {item.id for item in report.findings}
                 if not harness.is_substantive_owner(owner):
@@ -2981,7 +2953,7 @@ _None._
                 )
                 put(root, "docs/exec-plans/index.md", index_with_active())
                 report = harness.validate_plan_command(
-                    root, "safe-plan", "active", True, True
+            root, "safe-plan", "active", True
                 )
                 self.assertIn("PLAN003", {item.id for item in report.findings})
 
@@ -3159,20 +3131,20 @@ _None._
                 put(root, "docs/exec-plans/active/safe-plan.md", text)
                 put(root, "docs/exec-plans/index.md", index_with_active())
                 report = harness.validate_plan_command(
-                    root, "safe-plan", "active", True, True
+                    root, "safe-plan", "active", True
                 )
                 self.assertIn("PLAN003", {item.id for item in report.findings})
 
-    def test_standard_harness_index_routes_every_operational_authority(self) -> None:
+    def test_governed_harness_index_routes_every_operational_authority(self) -> None:
         temporary, root = self.make_root()
         self.addCleanup(temporary.cleanup)
-        self.install_standard_templates(root)
+        self.install_governed_templates(root)
         path = root / "docs/agent-harness/index.md"
         text = path.read_text(encoding="utf-8").replace(
             "(output-contract.md)", "(registry.md)"
         )
         path.write_text(text, encoding="utf-8")
-        report = harness.audit_repository(root, "standard", "check")
+        report = harness.audit_repository(root, "governed", "check")
         self.assertIn("ROUTE005", {item.id for item in report.findings})
 
     def test_plain_angle_comparisons_remain_substantive_facts(self) -> None:
@@ -3317,8 +3289,7 @@ _None._
         self.assertEqual(["manual"], manifest["maintenance"]["triggers"])
         skill_text = (harness.SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn(
-            "Do not create or modify GitHub Actions, GitLab CI, or other hosted workflow files "
-            "unless the user explicitly requests CI automation",
+            "The fast path does not create a new checker, ExecPlan, coverage matrix, evidence store, evaluation suite, CI workflow, maintenance schedule, pilot, backlog, or governance layer by default.",
             skill_text,
         )
 
@@ -3385,31 +3356,21 @@ _None._
             openai_metadata,
             r"(?m)^policy:\n  allow_implicit_invocation: false$",
         )
-        self.assertIn(
-            "Use the globally installed $apply-harness-engineering",
-            openai_metadata,
+        default_prompt = re.search(
+            r'(?m)^  default_prompt: "([^"]+)"$', openai_metadata
         )
-        self.assertIn(
-            "classify it using the skill's adoption-state rules",
-            openai_metadata,
-        )
-        self.assertIn(
-            "perform a fresh adoption only when no harness markers exist",
-            openai_metadata,
-        )
-        self.assertIn(
-            "manual task-completion revalidation without hosted workflow changes",
-            openai_metadata,
-        )
+        self.assertIsNotNone(default_prompt)
+        self.assertEqual(1, default_prompt.group(1).count("."))
+        self.assertIn("$apply-harness-engineering", default_prompt.group(1))
         self.assertIn(
             "Installing this package only makes the skill available to Codex.",
             skill_text,
         )
         self.assertIn(
-            "treat the invoked package directory as the harness-engineering package authority",
+            "Treat the invoked package directory as the package authority.",
             skill_text,
         )
-        self.assertIn("## Classify the adoption state", skill_text)
+        self.assertIn("## Discover and classify", skill_text)
         self.assertIn(
             "Treat the repository as a fresh adoption only when it has no explicit harness configuration",
             skill_text,
@@ -3418,10 +3379,8 @@ _None._
             "When the state is ambiguous, choose migration or repair rather than fresh adoption",
             skill_text,
         )
-        self.assertIn(
-            "explicitly invokes `$apply-harness-engineering`",
-            skill_text,
-        )
+        self.assertIn("explicit `$apply-harness-engineering` request", skill_text)
+        self.assertIn("Make the repository agent-discoverable", skill_text)
         forbidden = {"__pycache__", ".DS_Store"}
         git_listing = subprocess.run(
             ["git", "-C", str(harness.SKILL_ROOT), "ls-files", "-z"],
@@ -3435,7 +3394,7 @@ _None._
             candidates = [
                 harness.SKILL_ROOT / Path(raw)
                 for raw in git_listing.stdout.decode("utf-8").split("\0")
-                if raw
+                if raw and (harness.SKILL_ROOT / Path(raw)).exists()
             ]
         else:
             candidates = [
@@ -3452,6 +3411,32 @@ _None._
             self.assertFalse(path.is_symlink(), rel.as_posix())
             self.assertFalse(any(part in forbidden for part in rel.parts), rel.as_posix())
             self.assertNotIn(path.suffix.casefold(), {".pyc", ".pyo"})
+
+    def test_package_version_metadata_is_consistent_for_v020(self) -> None:
+        version = (harness.SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        readme = (harness.SKILL_ROOT / "README.md").read_text(encoding="utf-8")
+        changelog = (harness.SKILL_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.assertEqual("0.2.0", version)
+        self.assertIn("Package version: `0.2.0`", readme)
+        self.assertRegex(changelog, r"(?m)^## 0\.2\.0 — 2026-08-31$")
+        self.assertRegex(changelog, r"(?m)^## 0\.1\.0 — 2026-08-24 \(unreleased development baseline\)$")
+
+    def test_openai_metadata_is_durable_and_non_implicit(self) -> None:
+        metadata = (harness.SKILL_ROOT / "agents/openai.yaml").read_text(encoding="utf-8")
+        self.assertIn('display_name: "Apply Harness Engineering"', metadata)
+        short_description = re.search(
+            r'(?m)^  short_description: "([^"]+)"$', metadata
+        )
+        self.assertIsNotNone(short_description)
+        self.assertGreaterEqual(len(short_description.group(1)), 25)
+        self.assertLessEqual(len(short_description.group(1)), 64)
+        default_prompt = re.search(r'(?m)^  default_prompt: "([^"]+\.?)"$', metadata)
+        self.assertIsNotNone(default_prompt)
+        self.assertIn("$apply-harness-engineering", default_prompt.group(1))
+        self.assertIn("smallest durable change", default_prompt.group(1))
+        self.assertRegex(metadata, r"(?m)^policy:\n  allow_implicit_invocation: false$")
+        self.assertNotIn("standard", metadata.casefold())
+        self.assertNotIn("full", metadata.casefold())
 
     def test_package_check_ignores_target_repository_fragments(self) -> None:
         result = self.run_cli("check", "--root", str(harness.SKILL_ROOT))

@@ -20,11 +20,12 @@ This file exists only after an explicitly authorized repository adoption. Instal
 
 - Read the most local instruction file before editing a subtree.
 - Preserve unrelated user changes and follow existing repository conventions.
-- Use an ExecPlan for cross-cutting, risky, long-running, or context-loss-sensitive work.
-- Keep active ExecPlans current while implementing; record decisions and observed evidence.
+- Use an ExecPlan for cross-cutting, risky, long-running, or context-loss-sensitive work; small local changes do not need one by default.
+- Keep an active ExecPlan as restartable current state, not an execution transcript; record decisions, the next action, and concise observed evidence.
 - Validate behavior with the narrowest reliable command first, then run broader required checks.
-- Do not perform external writes, releases, deployments, destructive operations, or branch changes without the authority required by repository and user instructions.
-- Treat missing project commands, secrets, production access, or human approval as blockers. Never convert a template, placeholder, or local assertion into evidence that an external action occurred.
+- A repository-scoped request authorizes ordinary reversible local work. Do not perform external writes, releases, deployments, destructive operations, or branch changes without the authority required by repository and user instructions.
+- Complete local engineering when the requested behavior is observed, the focused check passes, the existing native gate (when present) passes, and the diff is reviewed. Report later release or production work separately as `not run` or `blocked`.
+- Treat missing project commands, secrets, production access, or human approval as blockers only when the in-scope requested outcome requires them. Never convert a template, placeholder, or local assertion into external evidence.
 
 ## Commands
 

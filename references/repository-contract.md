@@ -4,6 +4,8 @@ Keep one authoritative home for each kind of knowledge. Link from indexes instea
 
 ## Artifact ownership
 
+Create an artifact only when the requested outcome, an existing repository policy, or a concrete repeated risk needs it. A one-file `AGENTS.md` can be a complete starting point; installation or an adaptive audit does not require the full table below.
+
 | Artifact | Owns | Update trigger |
 | --- | --- | --- |
 | Root `AGENTS.md` | Canonical orientation, links, commands, durable constraints, and definition of done | A repeated agent failure or a navigation/command change |
@@ -22,40 +24,40 @@ Keep one authoritative home for each kind of knowledge. Link from indexes instea
 | `docs/agent-harness/operating-loop.md` | Human/agent responsibilities, review loop, recovery, and escalation | The development or approval workflow changes |
 | `docs/agent-harness/environment-contract.md` | Isolation, lifecycle commands, runtime signals, and cleanup | Local runtime or observability behavior changes |
 | `docs/agent-harness/model-and-agent-runtime.md` | Optional model/provider, state, compaction, tool/MCP, safety, and direct/PTC/multi-agent contract | An AI runtime, tool catalog, state strategy, or approval boundary changes |
-| `docs/agent-harness/evals.md` | Optional representative task baselines and model/orchestration comparison evidence | A prompt, model, reasoning setting, tool, orchestration, or eval dataset changes |
+| `docs/agent-harness/evals.md` | Optional focused or representative task baselines and model/orchestration comparison evidence | A prompt, model, reasoning setting, tool, orchestration, or eval dataset changes |
 | `docs/agent-harness/output-contract.md` | Completion evidence and handoff language | Review or release evidence requirements change |
 | `docs/agent-harness/verification-matrix.md` | Requirement-to-check-to-evidence mapping | A surface, risk, or verification path changes |
 | `docs/agent-harness/entropy-cleanup-checklist.md` | Recurring drift checks and escalation rules | A recurring anti-pattern or cleanup loop changes |
-| `docs/agent-harness/coverage-matrix.md` | Source-principle-to-artifact-to-evidence traceability | A harness capability is added, removed, or reclassified |
-| `docs/agent-harness/certification.md` | Optional strict harness-ready convergence, invalidation, and optional production-attestation boundary | The native gate, CI triggers, repair authority, evidence profile, or provider-verifier boundary changes |
-| `docs/agent-harness/certification.json` | Source-commit-, repository-, evaluation-target-, environment-, coverage-, and freshness-bound `harness-ready` manifest carried in a direct-child attestation commit | Any bound commit, identity, record, coverage digest, applicability decision, or freshness window changes |
+| `docs/agent-harness/coverage-matrix.md` | Optional source-principle-to-artifact-to-evidence traceability for an adopted governed contract | A harness capability is added, removed, or reclassified when this authority is in use |
+| `docs/agent-harness/certification.md` | Optional strict attestation convergence, invalidation, and production-attestation boundary | The native gate, CI triggers, repair authority, evidence profile, or provider-verifier boundary changes |
+| `docs/agent-harness/certification.json` | Source-commit-, repository-, evaluation-target-, environment-, coverage-, and freshness-bound strict manifest carried in a direct-child attestation commit | Any bound commit, identity, record, coverage digest, applicability decision, or freshness window changes |
 | `docs/agent-harness/evidence/` | HMAC-consistent v2 harness observation and applicability records referenced by coverage and the manifest; not externally authenticated production proof | A capability is exercised, reclassified, invalidated, or refreshed |
 
 ## Navigation rules
 
-- Keep the effective root entry point inside Codex's instruction-load budget. Codex tries a non-empty root `AGENTS.override.md`, then non-empty root `AGENTS.md`, then each configured `project_doc_fallback_filenames` entry in order; all critical routes must be present before the byte cutoff. The default `project_doc_max_bytes` is 32 KiB, and more local project instructions consume the effective root-to-working-directory chain. Prefer links over embedded essays, and require runtime evidence that the repository config is trusted and effective before relying on configured fallbacks.
+- Keep the effective root entry point concise and inside Codex's instruction-load budget. Codex tries a non-empty root `AGENTS.override.md`, then non-empty root `AGENTS.md`, then each configured `project_doc_fallback_filenames` entry in order. The default `project_doc_max_bytes` is 32 KiB, and more local project instructions consume the effective root-to-working-directory chain. Prefer links over embedded essays; a one-file MVP orientation is valid until deeper routes are needed.
 - Treat `.codex/config.toml` as a Codex configuration layer, not a harness authority map. Project configuration is trust-dependent and may be overridden by user, profile, nested project, or CLI layers. A repository-declared budget above 32 KiB requires runtime effective-config and instruction-load evidence; the bundled static checker remains conservative at 32 KiB. Run the helper with Python 3.11+ when this TOML file exists; older Python emits fail-closed `CODEXCFG001` because `tomllib` is unavailable.
 - Use repository-relative links and verify them mechanically.
-- Add an index to every collection whose members change over time.
+- Add an index to a collection whose members change over time; do not create an index for a one-off local change.
 - Name owners as roles or teams when individuals would make the document decay quickly.
 - Record `last verified` only when a person or command can actually refresh it.
 - Mark generated documents with their source and regeneration command. Do not hand-edit generated content.
 - Use `N/A` with a reason for intentionally absent surfaces; do not leave unexplained empty sections.
-- Treat certification as disabled by default. A strict harness-ready manifest, when explicitly enabled, is optional expiring state rather than durable truth. Bind HMAC-consistent v2 records and the manifest to source commit `S`, bind verification to clean direct-child attestation commit `A`, and keep records under the configured repository evidence root. Any later commit invalidates `A`. Complete, current strict attestation returns `CERT000`; the records remain local integrity evidence rather than provider-authenticated production proof. Emit `CERT015` only when `--require-production-attestation` was explicitly requested and its provider verifier is unavailable.
+- Treat certification as disabled by default. A strict manifest, when explicitly enabled, is optional expiring state rather than durable truth. Bind HMAC-consistent v2 records and the manifest to source commit `S`, bind verification to clean direct-child attestation commit `A`, and keep records under the configured repository evidence root. Any later commit invalidates `A`. Result codes and unavailable-provider behavior belong in the certification guidance; records remain local integrity evidence rather than provider-authenticated production proof.
 - Treat the installed skill as external tooling, not a repository lifecycle service. Installation alone creates no repository files, CI gate, scheduled invalidation, evidence, certificate, or repair authority.
 
 ## Change rules
 
 - Extend existing authoritative documents before creating competing ones.
 - When `docs/agent-harness/config.json` maps an authority away from a bundled fallback, update `AGENTS.md`, documentation maps, harness routers, coverage rows, and ExecPlan links that still present the fallback as canonical. The JSON mapping does not rewrite Markdown links by itself; run the harness check after every mapping change.
-- A mapped coverage authority may adapt implementation paths and evidence, but it must retain the complete bundled capability inventory. Mapping a smaller table is not a valid adoption-complete shortcut.
+- A mapped coverage authority may adapt implementation paths and evidence when the governed contract is adopted. Do not create or expand a coverage inventory for a small local change; when strict certification is explicitly requested, its existing certification guidance defines the required inventory.
 - Keep the canonical `instructions` authority at root `AGENTS.md`. When root `AGENTS.override.md` exists, Codex loads it instead, so it must route the same canonical authorities directly or through `AGENTS.md`. Naming an arbitrary path in this harness config does not make Codex load it.
 - When nested `AGENTS.override.md`, `AGENTS.md`, fallback instruction files, or nested `.codex/config.toml` layers exist, verify the effective chain from repository root to each relevant working directory. Do not infer that a root-only static pass proves every working-directory context.
 - Preserve repository terminology and language conventions.
-- Migrate content additively: create the target, link it, validate consumers, then retire duplicates in a separate safe step.
+- Migrate content additively: create the target, link it, validate consumers, then retire duplicates in a separate safe step. For an MVP orientation, preserve an existing root `AGENTS.md` rather than replacing it.
 - Keep policy in prose while it is exploratory. Promote it into a test or linter after it proves stable or protects a critical boundary.
-- Write failure messages for agents: state what failed, why it matters, the affected path, and the command or edit that fixes it.
+- Write failure messages for agents: state what failed, why it matters, the affected path, and the command or edit that fixes it. Keep successful evidence to a command, result, and short observation.
 
 ## Minimum useful content
 
-Do not count an empty template as adoption. Require every created artifact to contain project-specific facts, a clear owner or update trigger, and at least one navigation or verification path.
+Do not count an empty template as adoption. Require every created artifact to contain project-specific facts, a clear owner or update trigger, and at least one navigation or verification path. A fresh MVP fragment is intentionally generic but immediately usable and has no placeholders or broken links; tailor it when adopting it into a target repository.

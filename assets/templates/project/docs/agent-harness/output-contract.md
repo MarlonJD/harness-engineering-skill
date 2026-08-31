@@ -8,7 +8,7 @@ Use this contract for implementation handoffs. More local or risk-specific instr
 2. Name the material files or systems changed.
 3. Report exact verification commands and scoped outcomes.
 4. Separate remaining gaps, deferred debt, and approval-dependent work.
-5. State destructive, external, release, production, or real-device work only when it actually occurred with the required authority.
+5. Separate engineering completion from release and production state. State destructive, external, release, production, or real-device work only when it actually occurred with the required authority.
 6. When an AI runtime is applicable, include the model/provider/snapshot, runtime route, evaluation command or replay ID, and measured evidence needed to reproduce the result.
 
 ## Evidence labels
@@ -18,20 +18,16 @@ Use this contract for implementation handoffs. More local or risk-specific instr
 | `verified locally` | The stated command or behavior was exercised in the local task environment. |
 | `not run` | The check was intentionally not executed; include the reason. |
 | `blocked` | A named condition prevented required progress or verification. |
-| `candidate-only` | The harness change or command is plausible but still lacks evidence required by the bounded repository contract. |
-| `certification not used` | Default state. Strict attestation was not requested, no `CERT000` claim is made, and native-gate evidence remains the completion proof. |
-| `harness-ready` | The optional strict source/direct-child attestation pair, complete 31-row coverage, project-native gate, and fresh HMAC-consistent evidence passed with `CERT000`. This does not grant release, deployment, or production authority. |
-| `release pending` | Local work is complete, but release or deployment evidence does not exist. |
-| `production-ready` | Use only when `--require-production-attestation` was explicitly requested and an independently provisioned provider verifier authenticated repository and production-target identity, source/direct-child attestation commits, every coverage row, the project-native gate, production approval, rollback authority, artifact provenance, freshness, and revocation. Without that requested verifier, report `CERT015`; never infer this label from `harness-ready`, installation, templates, local checks, an arbitrary HMAC key, or self-asserted artifacts. |
 
 ## Handoff shape
 
 - Outcome: <!-- TODO(harness): project-specific expectation -->
 - Changed: <!-- paths or surfaces -->
-- Verification: <!-- exact command and result -->
-- Not verified: <!-- omitted or blocked surfaces and reason -->
-- Remaining work: <!-- explicit debt, follow-up plan, or none -->
+- Engineering verification: <!-- focused command/result and existing native gate, or not run/blocked with reason -->
+- Release state: <!-- verified locally, not run, or blocked; include only if in scope -->
+- Production state: <!-- verified locally, not run, or blocked; include only if in scope -->
+- Remaining work: <!-- explicit debt, follow-up, approval, or none -->
 
-For an AI-runtime change, also report the model/runtime baseline, eval result, tool/state evidence, and any untested route as `not run`, `blocked`, or `candidate-only`.
+For an AI-runtime change, also report the model/runtime baseline, focused evaluation result, tool/state evidence, and any untested route as `not run` or `blocked`.
 
 <!-- TODO(harness): Add repository-specific generated-file, migration, security, accessibility, observability, release, or reviewer evidence requirements. -->

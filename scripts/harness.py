@@ -52,7 +52,6 @@ MAX_MARKDOWN_FILES = 4_096
 MAX_MARKDOWN_PATH_BYTES = 2 * 1024 * 1024
 MAX_MARKDOWN_AGGREGATE_BYTES = 64 * 1024 * 1024
 MAX_OWNER_CHARS = 256
-MAX_REVIEW_EVIDENCE_CHARS = 4096
 MAX_ROUTED_DOCUMENT_BYTES = 8 * 1024 * 1024
 MARKDOWN_LINK_NESTING_SENTINEL = "\ue103HARNESS_LINK_NESTING_LIMIT\ue104"
 MARKDOWN_PARSE_BUDGET_SENTINEL = "\ue105HARNESS_PARSE_WORK_LIMIT\ue106"
@@ -80,7 +79,7 @@ MAINTENANCE_CAPABILITY = "continuous-harness-maintenance"
 PRODUCTION_APPROVAL_CAPABILITY = "production-authority-approval"
 PRODUCTION_ROLLBACK_CAPABILITY = "production-rollback-readiness"
 
-STANDARD_FILES = (
+GOVERNED_FILES = (
     "AGENTS.md",
     "ARCHITECTURE.md",
     "docs/index.md",
@@ -98,7 +97,6 @@ STANDARD_FILES = (
     "docs/agent-harness/verification-matrix.md",
     "docs/agent-harness/entropy-cleanup-checklist.md",
     "docs/agent-harness/coverage-matrix.md",
-    "docs/agent-harness/evidence/.gitkeep",
     "docs/exec-plans/index.md",
     "docs/exec-plans/plan-template.md",
     "docs/exec-plans/tech-debt-tracker.md",
@@ -109,13 +107,6 @@ STANDARD_FILES = (
     "docs/product-specs/index.md",
     "docs/generated/index.md",
     "docs/references/index.md",
-)
-
-FULL_ONLY_FILES = (
-    "docs/DESIGN.md",
-    "docs/FRONTEND.md",
-    "docs/PRODUCT_SENSE.md",
-    "docs/QUALITY_SCORE.md",
 )
 
 MANAGED_DIRS = (
@@ -447,15 +438,42 @@ def files_for_profile(
     files: tuple[str, ...]
     if profile == "adaptive":
         files = ()
-    elif profile == "standard":
-        files = STANDARD_FILES
-    elif profile == "full":
-        files = STANDARD_FILES + FULL_ONLY_FILES
+    elif profile == "governed":
+        files = GOVERNED_FILES
     else:
         raise SafeRefusal(f"Unknown profile: {profile}")
     if include_certification:
         files += CERTIFICATION_OPTIONAL_FILES
     return files
+
+
+# The MVP scaffold deliberately has a separate, one-file mapping.  It is not
+# an audit/check/certify profile and must not grow into the governed managed
+# layout by accident.
+MVP_SCAFFOLD_MAPPING = (
+    ("assets/templates/fragments/AGENTS.mvp.md", "AGENTS.md"),
+)
+
+
+def scaffold_template_mappings(
+    profile: str,
+    *,
+    include_certification: bool = False,
+) -> tuple[tuple[str, str], ...]:
+    """Resolve scaffold sources to target paths without mutating a project."""
+    if profile == "mvp":
+        if include_certification:
+            raise SafeRefusal(
+                "The mvp scaffold is a one-file orientation only and cannot include certification; "
+                "select governed for the optional strict overlay."
+            )
+        return MVP_SCAFFOLD_MAPPING
+    if profile != "governed":
+        raise SafeRefusal(f"Unknown scaffold profile: {profile}")
+    return tuple((relative, relative) for relative in files_for_profile(
+        profile,
+        include_certification=include_certification,
+    ))
 
 
 def scaffold_comment_fingerprints(text: str) -> set[str]:
@@ -3517,128 +3535,6 @@ def is_substantive_owner(value: object) -> bool:
     return not any(phrase in normalized for phrase in phrases)
 
 
-@dataclass(frozen=True)
-class SemanticReviewAttestation:
-    start: int
-    end: int
-    reviewer: str
-    reviewed_at: str
-    content_sha256: str
-    evidence: str
-
-
-SEMANTIC_REVIEW_RE = re.compile(
-    r"^[ \t]{1,3}Semantic-Review:[ \t]*"
-    rf"reviewer=([^;\r\n]{{1,{MAX_OWNER_CHARS}}});[ \t]*"
-    r"reviewed-at=(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}Z);[ \t]*"
-    r"content-sha256=([0-9a-fA-F]{64});[ \t]*"
-    rf"evidence=(.{{1,{MAX_REVIEW_EVIDENCE_CHARS}}})$",
-    re.IGNORECASE,
-)
-
-
-def revision_history_source_span(text: str, structural: str) -> tuple[int, int] | None:
-    headings = list(H2_RE.finditer(structural))
-    matches = [
-        (index, match)
-        for index, match in enumerate(headings)
-        if match.group(1).strip() == "Revision History"
-    ]
-    if len(matches) != 1:
-        return None
-    index, match = matches[0]
-    end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
-    return match.end(), end
-
-
-def live_semantic_review_attestations(text: str) -> list[SemanticReviewAttestation]:
-    """Return visible attestations from the real Revision History section only."""
-    structural = mask_markdown_code(mask_navigation_blockquotes(text))
-    span = revision_history_source_span(text, structural)
-    if span is None:
-        return []
-    section_start, section_end = span
-    structural_section = structural[section_start:section_end]
-    attestations: list[SemanticReviewAttestation] = []
-    cursor = 0
-    for structural_line in markdown_source_lines(structural_section, keepends=True):
-        structural_body = structural_line.rstrip("\r\n")
-        line_ending_length = len(structural_line) - len(structural_body)
-        raw_start = section_start + cursor
-        raw_end = raw_start + len(structural_body)
-        raw_body = text[raw_start:raw_end]
-        structural_match = SEMANTIC_REVIEW_RE.fullmatch(structural_body)
-        raw_match = SEMANTIC_REVIEW_RE.fullmatch(raw_body)
-        if structural_match is not None and raw_match is not None:
-            reviewer, reviewed_at, content_sha256, evidence = (
-                part.strip() for part in raw_match.groups()
-            )
-            attestations.append(
-                SemanticReviewAttestation(
-                    start=raw_start,
-                    end=raw_end + line_ending_length,
-                    reviewer=reviewer,
-                    reviewed_at=reviewed_at,
-                    content_sha256=content_sha256.casefold(),
-                    evidence=evidence,
-                )
-            )
-        cursor += len(structural_line)
-    return attestations
-
-
-def semantic_review_content_sha256(text: str) -> str | None:
-    """Hash exact plan bytes after removing its one visible attestation line."""
-    attestations = live_semantic_review_attestations(text)
-    if len(attestations) != 1:
-        return None
-    attestation = attestations[0]
-    canonical = text[: attestation.start] + text[attestation.end :]
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def semantic_review_attestation_is_valid(text: str) -> bool:
-    """Validate visible, final-revision evidence bound to the current plan bytes."""
-    attestations = live_semantic_review_attestations(text)
-    if len(attestations) != 1:
-        return False
-    attestation = attestations[0]
-    structural = mask_markdown_code(mask_navigation_blockquotes(text))
-    span = revision_history_source_span(text, structural)
-    if span is None:
-        return False
-    section_start, section_end = span
-    revision = structural[section_start:section_end]
-    entry_re = re.compile(
-        r"(?m)^[ \t]{0,3}[-*+]\s+"
-        r"\((\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}Z)\)\s+Change:"
-    )
-    entries = list(entry_re.finditer(revision))
-    if not entries:
-        return False
-    final_entry = entries[-1]
-    if attestation.start <= section_start + final_entry.start():
-        return False
-    try:
-        reviewed_at = datetime.strptime(attestation.reviewed_at, "%Y-%m-%d %H:%MZ")
-        final_revision_at = datetime.strptime(
-            final_entry.group(1), "%Y-%m-%d %H:%MZ"
-        )
-    except ValueError:
-        return False
-    current_digest = semantic_review_content_sha256(text)
-    return bool(
-        is_substantive_owner(attestation.reviewer)
-        and reviewed_at >= final_revision_at
-        and reviewed_at <= datetime.now(timezone.utc).replace(tzinfo=None)
-        and current_digest == attestation.content_sha256
-        and 80 <= substantive_length(attestation.evidence)
-        <= MAX_REVIEW_EVIDENCE_CHARS
-        and not has_unresolved_marker(attestation.evidence)
-        and not contains_raw_html_markup(attestation.evidence)
-    )
-
-
 def normalize_coverage_identity(value: str) -> str:
     return visible_markdown_cell(value).casefold()
 
@@ -5637,7 +5533,6 @@ def validate_plan_semantics(
     expected_state: str,
     planning_path: Path,
     completion_gate: bool,
-    semantic_review: bool,
     simulate_completed_location: bool = False,
 ) -> None:
     rel = relative_display(root, plan_path)
@@ -5926,23 +5821,6 @@ def validate_plan_semantics(
                 "Revision History contains no entries or at least one malformed entry.",
                 "Make every revision a list item with a valid UTC timestamp, Change:, and Reason:.",
             )
-        if not semantic_review_attestation_is_valid(text):
-            report.add(
-                "PLAN016",
-                "error",
-                rel,
-                "Completion has no valid persistent semantic-review attestation.",
-                "Add one visible indented continuation to the final Revision History entry using Semantic-Review: reviewer=<role-or-team>; reviewed-at=<YYYY-MM-DD HH:MMZ>; content-sha256=<digest after removing this entire line, including its line ending>; evidence=<substantive observed review evidence>.",
-            )
-        if not semantic_review:
-            report.add(
-                "PLAN013",
-                "error",
-                rel,
-                "Semantic completion review was not asserted.",
-                "Review self-containment, milestones, observable behavior, recovery, and evidence; then pass --semantic-review.",
-            )
-
     anchor_cache: dict[Path, tuple[set[str] | None, str | None]] = {}
     check_text_links(
         report,
@@ -6204,7 +6082,6 @@ def validate_index(
                 state,
                 planning_path,
                 completion_gate=state == "completed",
-                semantic_review=True,
             )
         for target in sorted(file_targets - row_sets[state]):
             report.add(
@@ -6371,33 +6248,8 @@ def validate_authority_reachability(
         )
 
 
-def validate_full_profile_navigation(report: Report, root: Path) -> None:
-    docs_index = safe_target(root, "docs/index.md")
-    if not docs_index.is_file():
-        return
-    try:
-        text = read_text_safe(root, docs_index)
-    except (OSError, SafeRefusal):
-        return
-    targets: set[Path] = set()
-    for raw in markdown_navigation_destinations(text):
-        target, error = resolve_markdown_link(root, docs_index, raw)
-        if not error and target is not None:
-            targets.add(target.resolve(strict=False))
-    for rel in FULL_ONLY_FILES:
-        expected = safe_target(root, rel).resolve(strict=False)
-        if expected not in targets:
-            report.add(
-                "ROUTE004",
-                "error",
-                "docs/index.md",
-                f"Full-profile authority is not linked from the documentation map: {rel}.",
-                "Merge and tailor assets/templates/fragments/docs-index.full.md into docs/index.md.",
-            )
-
-
 def validate_harness_index_navigation(report: Report, root: Path) -> None:
-    """Require the standard harness index to route every operational authority."""
+    """Require the governed harness index to route every operational authority."""
     harness_index = safe_target(root, "docs/agent-harness/index.md")
     if not harness_index.is_file() or harness_index.is_symlink():
         return
@@ -6554,7 +6406,7 @@ def audit_repository(root: Path, profile: str, command: str) -> Report:
                     severity,
                     rel,
                     f"The selected {profile} profile artifact is missing.",
-                    "Standard/full are exact-layout profiles: create and tailor this path, or use adaptive checking with configured equivalents.",
+                    "Governed is an exact-layout profile: create and tailor this path, or use adaptive checking with configured equivalents.",
                 )
             else:
                 try:
@@ -6584,7 +6436,7 @@ def audit_repository(root: Path, profile: str, command: str) -> Report:
                     severity,
                     rel,
                     f"The selected {profile} profile lifecycle directory is missing or unsafe.",
-                    "Create a regular repository directory or select a smaller profile.",
+                    "Create a regular repository directory or select adaptive checking.",
                 )
 
     override_path = safe_target(root, "AGENTS.override.md")
@@ -6642,12 +6494,10 @@ def audit_repository(root: Path, profile: str, command: str) -> Report:
     validate_authority_reachability(
         report, root, authorities, instruction_budget, instructions_path
     )
-    if profile in {"standard", "full"}:
+    if profile == "governed":
         validate_harness_index_navigation(report, root)
-    if profile == "full":
-        validate_full_profile_navigation(report, root)
     explicit_authorities = configured_authority_keys(root)
-    if profile in {"standard", "full"} or "exec_plan_index" in explicit_authorities:
+    if profile == "governed" or "exec_plan_index" in explicit_authorities:
         index_path = safe_target(root, authorities["exec_plan_index"])
         planning_path = safe_target(root, authorities["planning"])
         if not planning_path.is_file() or planning_path.is_symlink():
@@ -6659,7 +6509,7 @@ def audit_repository(root: Path, profile: str, command: str) -> Report:
                 "Create or map the repository's ExecPlan authoring contract before adopting the managed lifecycle.",
             )
         validate_index(report, root, index_path, planning_path)
-    if profile in {"standard", "full"}:
+    if profile == "governed":
         coverage_path = safe_target(root, DEFAULT_AUTHORITIES["coverage"])
         validate_coverage(
             report,
@@ -6679,7 +6529,7 @@ def audit_repository(root: Path, profile: str, command: str) -> Report:
             report,
             root,
             safe_target(root, authorities["coverage"]),
-            require_canonical_rows=True,
+            require_canonical_rows=False,
         )
     check_links(report, root, all_markdown)
     report.add(
@@ -6694,22 +6544,28 @@ def audit_repository(root: Path, profile: str, command: str) -> Report:
 
 def scaffold_preview(
     root: Path,
-    profile: str,
+    profile: str = "mvp",
     *,
     include_certification: bool = False,
 ) -> Report:
     root = resolve_safe_directory(root)
     report = Report(command="scaffold", root=str(root))
-    for rel in files_for_profile(
-        profile, include_certification=include_certification
-    ):
-        source = TEMPLATE_ROOT / rel
-        target = safe_target(root, rel)
+    mappings = scaffold_template_mappings(
+        profile,
+        include_certification=include_certification,
+    )
+    for source_rel, target_rel in mappings:
+        source = (
+            SKILL_ROOT / source_rel
+            if source_rel.startswith("assets/")
+            else TEMPLATE_ROOT / source_rel
+        )
+        target = safe_target(root, target_rel)
         if not source.is_file():
             report.add(
                 "TEMPLATE001",
                 "error",
-                rel,
+                source_rel,
                 "Bundled template is missing.",
                 "Repair the skill package before applying this profile.",
             )
@@ -6717,13 +6573,19 @@ def scaffold_preview(
             report.add(
                 "PATH002",
                 "error",
-                rel,
+                target_rel,
                 "Target collides with a non-file path.",
                 "Resolve the collision before applying a template.",
             )
         report.add_action(
-            {"action": "preserve" if target.is_file() else "would-create", "path": rel}
+            {
+                "action": "preserve" if target.is_file() else "would-create",
+                "path": target_rel,
+            }
         )
+    if profile == "mvp":
+        return report.normalized()
+
     for rel in MANAGED_DIRS:
         target = safe_target(root, rel)
         if target.exists() and (not target.is_dir() or target.is_symlink()):
@@ -6737,17 +6599,6 @@ def scaffold_preview(
         report.add_action(
             {"action": "preserve-dir" if target.is_dir() else "would-create-dir", "path": rel}
         )
-    if profile == "full":
-        fragment = SKILL_ROOT / "assets" / "templates" / "fragments" / "docs-index.full.md"
-        if not fragment.is_file():
-            report.add(
-                "TEMPLATE001",
-                "error",
-                "assets/templates/fragments/docs-index.full.md",
-                "The full-profile navigation fragment is missing.",
-                "Repair the skill package before applying the full profile.",
-            )
-        report.add_action({"action": "would-merge", "path": "docs/index.md"})
     return report.normalized()
 
 
@@ -6756,7 +6607,6 @@ def validate_plan_command(
     slug: str,
     state: str,
     completion: bool,
-    semantic_review: bool,
 ) -> Report:
     root = resolve_safe_directory(root)
     report = Report(command="validate-plan", root=str(root))
@@ -6791,7 +6641,6 @@ def validate_plan_command(
         state,
         planning_path,
         completion_gate=completion or state == "completed",
-        semantic_review=semantic_review,
         simulate_completed_location=completion,
     )
     return report.normalized()
@@ -6846,6 +6695,8 @@ def add_root_options(
     parser: argparse.ArgumentParser,
     *,
     include_profile: bool = True,
+    profile_choices: tuple[str, ...] = ("adaptive", "governed"),
+    profile_default: str = "adaptive",
 ) -> None:
     parser.add_argument("--root", default=".", help="Repository root (default: current directory)")
     parser.add_argument(
@@ -6857,8 +6708,8 @@ def add_root_options(
     if include_profile:
         parser.add_argument(
             "--profile",
-            choices=("adaptive", "standard", "full"),
-            default="adaptive",
+            choices=profile_choices,
+            default=profile_default,
         )
 
 
@@ -6879,7 +6730,11 @@ def build_parser() -> argparse.ArgumentParser:
         "certify",
         help="Commit-bound validation of the repository-level harness contract",
     )
-    add_root_options(certify)
+    add_root_options(
+        certify,
+        profile_choices=("governed", "adaptive"),
+        profile_default="governed",
+    )
     certify.add_argument(
         "--commit",
         required=True,
@@ -6900,10 +6755,14 @@ def build_parser() -> argparse.ArgumentParser:
         "scaffold", help="Read-only manifest preview for a deliberately selected profile"
     )
     add_root_options(scaffold, include_profile=False)
-    scaffold.add_argument("--profile", choices=("standard", "full"), required=True)
+    scaffold.add_argument(
+        "--profile",
+        choices=("mvp", "governed"),
+        default="mvp",
+        help="Scaffold size (default: mvp; audit/check/certify profiles are separate)",
+    )
     scaffold.add_argument(
         "--with-certification",
-        "--enable-certification",
         dest="with_certification",
         action="store_true",
         help="Include the optional strict-certification files; disabled by default",
@@ -6916,11 +6775,6 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--slug", required=True)
     validate.add_argument("--state", choices=("active", "completed"), required=True)
     validate.add_argument("--completion", action="store_true")
-    validate.add_argument(
-        "--semantic-review",
-        action="store_true",
-        help="Assert that a human or agent performed the documented semantic review",
-    )
     return parser
 
 
@@ -6994,7 +6848,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.slug,
                 args.state,
                 args.completion,
-                args.semantic_review,
             )
             print_report(report, args.format)
             return 1 if report.summary()["errors"] else 0

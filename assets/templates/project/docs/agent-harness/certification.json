@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "claim": "harness-ready",
-  "profile": "standard",
+  "profile": "governed",
   "repository_commit": "<replace-with-source-commit-before-attestation-overlay>",
   "repository_identity": "<replace-with-provider-scoped-immutable-repository-id>",
   "deployment_target_id": "<replace-with-stable-harness-evaluation-target-id>",
